@@ -8,7 +8,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=sqlite:///./shared_data.db
+      - DATABASE_URL=sqlite:///./shared_data.database
     volumes:
       - shared_data:/app/data
     networks:
