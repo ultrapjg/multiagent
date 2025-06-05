@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "get_current_time": {
+      "command": "python",
+      "args": ["mcp_server_time.py"],
+      "transport": "stdio"
+    }
+  }
+}
