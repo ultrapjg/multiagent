@@ -1,7 +1,7 @@
 import asyncio
 import json
 import os
-from typing import Dict, List, Any, AsyncGenerator, Optional, Literal, TypedDict
+from typing import Dict, List, Any, AsyncGenerator, Optional, Literal, TypedDict, Callable
 from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
 from langchain_ollama import ChatOllama
@@ -30,6 +30,12 @@ class WorkflowState(TypedDict):
     max_iterations: int
     final_answer: str
     reasoning_trace: List[str]
+    # Human-in-the-loop 관련 필드
+    human_approval_needed: bool
+    human_input_requested: bool
+    human_response: Optional[str]
+    pending_decision: Optional[Dict[str, Any]]
+    hitl_enabled: bool
 
 
 class ToolEvaluationResult(Enum):
@@ -40,30 +46,64 @@ class ToolEvaluationResult(Enum):
     NEEDS_MORE_INFO = "needs_more_info"
 
 
+class HumanApprovalType(Enum):
+    """Human approval 타입"""
+    TOOL_EXECUTION = "tool_execution"
+    HIGH_IMPACT_DECISION = "high_impact_decision"
+    LOW_CONFIDENCE = "low_confidence"
+    FINAL_ANSWER = "final_answer"
+
+
 class SupervisorService:
-    """동적 워크플로우 기반 LangGraph MCP 에이전트 서비스"""
+    """Human-in-the-loop 기능을 포함한 동적 워크플로우 기반 LangGraph MCP 에이전트 서비스"""
 
     def __init__(self):
         self.mcp_client = None
         self.model = None
-        self.evaluator_model = None  # 평가 전용 모델
+        self.evaluator_model = None
         self.tools = []
         self.workflow = None
         self.checkpointer = InMemorySaver()
         self.timeout_seconds = 120
 
+        # Human-in-the-loop 설정
+        self.hitl_config = {
+            "enabled": True,
+            "require_approval_for_tools": False,  # 도구 실행 전 승인 필요
+            "require_approval_for_low_confidence": True,  # 낮은 신뢰도 시 승인 필요
+            "require_approval_for_final_answer": False,  # 최종 답변 전 승인 필요
+            "confidence_threshold": 0.7,  # 이 값 이하면 human approval 요청
+            "high_impact_tools": ["file_operations", "external_api_calls", "system_commands"]  # 고위험 도구
+        }
+
+        # Human input callback
+        self.human_input_callback: Optional[Callable] = None
+
         # 로깅 설정
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
+
+    def set_human_input_callback(self, callback: Callable[[str, Dict], str]):
+        """Human input callback 설정"""
+        self.human_input_callback = callback
+
+    def configure_hitl(self, **config):
+        """Human-in-the-loop 설정 업데이트"""
+        self.hitl_config.update(config)
+        self.logger.info(f"HITL 설정 업데이트: {self.hitl_config}")
 
     async def initialize_agent(self,
                                model_name: str = "qwen2.5:32b",
                                evaluator_model_name: Optional[str] = None,
                                mcp_config: Optional[Dict] = None,
-                               system_prompt: Optional[str] = None):
+                               system_prompt: Optional[str] = None,
+                               hitl_enabled: bool = True):
         """동적 워크플로우 에이전트 초기화"""
         try:
-            self.logger.info(f"동적 워크플로우 에이전트 초기화 시작: {model_name}")
+            self.logger.info(f"HITL 지원 동적 워크플로우 에이전트 초기화 시작: {model_name}")
+
+            # HITL 설정
+            self.hitl_config["enabled"] = hitl_enabled
 
             # 기존 클라이언트 정리
             await self.cleanup_mcp_client()
@@ -85,7 +125,7 @@ class SupervisorService:
             # 동적 워크플로우 생성
             self.workflow = self._create_dynamic_workflow()
 
-            self.logger.info(f"동적 워크플로우 에이전트 초기화 완료. 도구 {len(self.tools)}개 로드됨")
+            self.logger.info(f"HITL 지원 동적 워크플로우 에이전트 초기화 완료. 도구 {len(self.tools)}개 로드됨")
             return True
 
         except Exception as e:
@@ -93,17 +133,19 @@ class SupervisorService:
             return False
 
     def _create_dynamic_workflow(self) -> StateGraph:
-        """동적 워크플로우 생성"""
+        """Human-in-the-loop 기능을 포함한 동적 워크플로우 생성"""
         workflow = StateGraph(WorkflowState)
 
         # 노드 추가
         workflow.add_node("analyze_query", self._analyze_query)
         workflow.add_node("plan_execution", self._plan_execution)
+        workflow.add_node("human_approval", self._human_approval)  # Human approval 노드
         workflow.add_node("execute_tools", self._execute_tools)
         workflow.add_node("evaluate_results", self._evaluate_results)
         workflow.add_node("synthesize_answer", self._synthesize_answer)
         workflow.add_node("quality_check", self._quality_check)
-        workflow.add_node("simple_answer", self._simple_answer)  # 간단한 답변용 노드 추가
+        workflow.add_node("simple_answer", self._simple_answer)
+        workflow.add_node("human_input", self._human_input)  # Human input 노드
 
         # 워크플로우 연결
         workflow.add_edge(START, "analyze_query")
@@ -113,33 +155,50 @@ class SupervisorService:
             "analyze_query",
             self._decide_after_analysis,
             {
-                "simple": "simple_answer",  # 도구 불필요한 간단한 쿼리
-                "complex": "plan_execution"  # 복잡한 쿼리 (기존 워크플로우)
+                "simple": "simple_answer",
+                "complex": "plan_execution"
             }
         )
 
-        # 간단한 답변 후 바로 종료
         workflow.add_edge("simple_answer", END)
 
-        # 기존 복잡한 워크플로우
+        # 계획 후 Human approval 체크
         workflow.add_conditional_edges(
             "plan_execution",
             self._decide_after_planning,
             {
                 "execute": "execute_tools",
+                "need_approval": "human_approval",  # Human approval 필요
                 "skip_to_synthesize": "synthesize_answer",
                 "end": END
             }
         )
 
+        # Human approval 후 분기
+        workflow.add_conditional_edges(
+            "human_approval",
+            self._decide_after_approval,
+            {
+                "approved": "execute_tools",
+                "rejected": "plan_execution",  # 다시 계획
+                "modified": "plan_execution",  # 수정된 계획으로
+                "need_input": "human_input"  # 추가 입력 필요
+            }
+        )
+
+        # Human input 후 계획으로 돌아가기
+        workflow.add_edge("human_input", "plan_execution")
+
         workflow.add_edge("execute_tools", "evaluate_results")
 
+        # 평가 후 낮은 신뢰도 시 Human approval
         workflow.add_conditional_edges(
             "evaluate_results",
             self._decide_next_step,
             {
                 "continue": "plan_execution",
                 "synthesize": "synthesize_answer",
+                "need_approval": "human_approval",  # 낮은 신뢰도로 인한 approval
                 "end": END
             }
         )
@@ -150,83 +209,12 @@ class SupervisorService:
             self._decide_final_step,
             {
                 "approved": END,
-                "retry": "plan_execution"
+                "retry": "plan_execution",
+                "need_approval": "human_approval"  # 최종 답변 승인
             }
         )
 
         return workflow.compile(checkpointer=self.checkpointer)
-
-    def _decide_after_analysis(self, state: WorkflowState) -> Literal["simple", "complex"]:
-        """분석 단계 후 단순/복잡 쿼리 결정"""
-        current_step = state.get("current_step", "")
-
-        if current_step == "simple_query":
-            self.logger.info("간단한 쿼리로 판단 - 직접 답변 생성")
-            return "simple"
-        else:
-            self.logger.info("복잡한 쿼리로 판단 - 전체 워크플로우 실행")
-            return "complex"
-
-    async def _simple_answer(self, state: WorkflowState) -> WorkflowState:
-        """도구 없이 간단한 직접 답변"""
-        self.logger.info("간단한 직접 답변 생성 중...")
-
-        simple_prompt = ChatPromptTemplate.from_messages([
-            ("system", """당신은 친근하고 도움이 되는 AI 어시스턴트입니다.
-사용자의 간단한 쿼리에 대해 자연스럽고 적절한 답변을 제공하세요.
-
-특별한 도구나 실시간 정보가 필요하지 않은 간단한 질문이므로, 
-당신의 기본 지식과 대화 능력을 활용하여 답변하세요.
-
-답변은 다음과 같이 작성하세요:
-- 자연스럽고 친근한 톤
-- 적절한 길이 (너무 길지 않게)
-- 필요시 추가 도움 제안"""),
-            ("human", "사용자 쿼리: {query}")
-        ])
-
-        try:
-            response = await self.model.ainvoke(
-                simple_prompt.format_messages(query=state["user_query"])
-            )
-
-            state["final_answer"] = response.content
-            state["current_step"] = "simple_answer_generated"
-            state["reasoning_trace"].append("간단한 직접 답변 생성 완료")
-
-        except Exception as e:
-            self.logger.error(f"간단한 답변 생성 실패: {e}")
-            # 폴백 답변
-            if any(greeting in state["user_query"].lower() for greeting in ["안녕", "반가", "hi", "hello"]):
-                state["final_answer"] = "안녕하세요! 무엇을 도와드릴까요?"
-            else:
-                state["final_answer"] = "네, 무엇을 도와드릴까요?"
-            state["current_step"] = "simple_answer_generated"
-
-        return state
-
-    def _decide_after_planning(self, state: WorkflowState) -> Literal["execute", "skip_to_synthesize", "end"]:
-        """계획 단계 후 다음 동작 결정"""
-        if state["iteration_count"] >= state["max_iterations"]:
-            return "end"
-
-        current_step = state.get("current_step", "")
-
-        if current_step == "plan_skipped":
-            self.logger.info("계획이 생략됨 - 도구 실행 건너뛰고 바로 답변 합성")
-            return "skip_to_synthesize"
-        elif current_step == "no_suitable_tools":
-            self.logger.info("적합한 도구 없음 - 도구 실행 없이 바로 답변 합성")
-            return "skip_to_synthesize"
-        elif current_step == "plan_ready":
-            self.logger.info("계획 완료 - 도구 실행 진행")
-            return "execute"
-        elif current_step == "plan_failed":
-            self.logger.warning("계획 실패 - 종료")
-            return "end"
-        else:
-            # 기본값: 도구 실행
-            return "execute"
 
     async def _analyze_query(self, state: WorkflowState) -> WorkflowState:
         """사용자 쿼리 분석"""
@@ -403,6 +391,67 @@ JSON 형식으로 응답하세요:
 
         return state
 
+    async def _human_approval(self, state: WorkflowState) -> WorkflowState:
+        """Human approval 요청 처리"""
+        self.logger.info("Human approval 요청 중...")
+
+        if not self.hitl_config.get("enabled", False):
+            self.logger.info("HITL이 비활성화됨 - 자동 승인")
+            state["human_response"] = "approved"
+            return state
+
+        pending_decision = state.get("pending_decision", {})
+        approval_type = pending_decision.get("type", "unknown")
+
+        # 승인 요청 메시지 구성
+        approval_message = self._create_approval_message(state, approval_type, pending_decision)
+
+        try:
+            if self.human_input_callback:
+                # Callback을 통해 human input 요청
+                human_response = self.human_input_callback(approval_message, pending_decision)
+                state["human_response"] = human_response
+                state["reasoning_trace"].append(f"Human approval 응답: {human_response}")
+            else:
+                # Callback이 없으면 자동 승인 (개발/테스트 용)
+                self.logger.warning("Human input callback이 설정되지 않음 - 자동 승인")
+                state["human_response"] = "approved"
+
+        except Exception as e:
+            self.logger.error(f"Human approval 처리 실패: {e}")
+            state["human_response"] = "approved"  # 실패 시 자동 승인
+
+        state["human_approval_needed"] = False
+        return state
+
+    async def _human_input(self, state: WorkflowState) -> WorkflowState:
+        """Human input 요청 처리"""
+        self.logger.info("Human input 요청 중...")
+
+        if not self.hitl_config.get("enabled", False):
+            state["human_response"] = "continue"
+            return state
+
+        input_message = "추가 정보나 지시사항을 제공해주세요:"
+
+        try:
+            if self.human_input_callback:
+                human_input = self.human_input_callback(input_message, {"type": "input_request"})
+                state["human_response"] = human_input
+                state["reasoning_trace"].append(f"Human input 수신: {human_input}")
+                # 받은 입력을 사용자 쿼리에 추가
+                state["user_query"] += f"\n[추가 정보: {human_input}]"
+            else:
+                self.logger.warning("Human input callback이 설정되지 않음")
+                state["human_response"] = "continue"
+
+        except Exception as e:
+            self.logger.error(f"Human input 처리 실패: {e}")
+            state["human_response"] = "continue"
+
+        state["human_input_requested"] = False
+        return state
+
     async def _execute_tools(self, state: WorkflowState) -> WorkflowState:
         """실제 MCP 도구 실행"""
         self.logger.info("MCP 도구 실행 단계...")
@@ -577,44 +626,6 @@ JSON 형식으로 응답하세요:
 
         return state
 
-    def _decide_next_step(self, state: WorkflowState) -> Literal["continue", "synthesize", "end"]:
-        """다음 단계 결정"""
-        # 먼저 최대 반복 횟수 체크
-        if state["iteration_count"] >= state["max_iterations"]:
-            self.logger.info(f"최대 반복 횟수({state['max_iterations']}) 도달 - 종료")
-            return "end"
-
-        if not state["evaluation_results"]:
-            self.logger.info("평가 결과가 없음 - 계속 진행")
-            return "continue"
-
-        latest_evaluation = state["evaluation_results"][-1]
-        evaluation_type = latest_evaluation.get("evaluation", "")
-        confidence = latest_evaluation.get("confidence", 0.0)
-
-        self.logger.info(
-            f"평가 결과 확인: type={evaluation_type}, confidence={confidence:.2f}, iteration={state['iteration_count']}")
-
-        # 완벽한 신뢰도(1.0) 또는 매우 높은 신뢰도(0.95+)와 SUCCESS면 즉시 합성
-        if confidence >= 1.0:
-            self.logger.info(f"완벽한 신뢰도({confidence:.2f}) 달성 - 즉시 답변 합성")
-            return "synthesize"
-        elif confidence >= 0.95 and evaluation_type == ToolEvaluationResult.SUCCESS.value:
-            self.logger.info(f"매우 높은 신뢰도({confidence:.2f})와 성공 결과 - 답변 합성")
-            return "synthesize"
-        elif evaluation_type == ToolEvaluationResult.SUCCESS.value and confidence >= 0.8:
-            self.logger.info(f"높은 신뢰도({confidence:.2f})와 성공 결과 - 답변 합성")
-            return "synthesize"
-        elif evaluation_type == ToolEvaluationResult.NEEDS_MORE_INFO.value and confidence < 0.9:
-            self.logger.info(f"추가 정보 필요({confidence:.2f}) - 계속 진행")
-            return "continue"
-        elif confidence >= 0.7:
-            self.logger.info(f"적절한 신뢰도({confidence:.2f}) - 답변 합성")
-            return "synthesize"
-        else:
-            self.logger.info(f"낮은 신뢰도({confidence:.2f}) - 계속 진행")
-            return "continue"
-
     async def _synthesize_answer(self, state: WorkflowState) -> WorkflowState:
         """최종 답변 합성"""
         self.logger.info("최종 답변 합성 중...")
@@ -730,18 +741,237 @@ JSON 형식으로 응답하세요:
 
         return state
 
-    def _decide_final_step(self, state: WorkflowState) -> Literal["approved", "retry"]:
-        """최종 단계 결정"""
+    async def _simple_answer(self, state: WorkflowState) -> WorkflowState:
+        """도구 없이 간단한 직접 답변"""
+        self.logger.info("간단한 직접 답변 생성 중...")
+
+        simple_prompt = ChatPromptTemplate.from_messages([
+            ("system", """당신은 친근하고 도움이 되는 AI 어시스턴트입니다.
+사용자의 간단한 쿼리에 대해 자연스럽고 적절한 답변을 제공하세요.
+
+특별한 도구나 실시간 정보가 필요하지 않은 간단한 질문이므로, 
+당신의 기본 지식과 대화 능력을 활용하여 답변하세요.
+
+답변은 다음과 같이 작성하세요:
+- 자연스럽고 친근한 톤
+- 적절한 길이 (너무 길지 않게)
+- 필요시 추가 도움 제안"""),
+            ("human", "사용자 쿼리: {query}")
+        ])
+
+        try:
+            response = await self.model.ainvoke(
+                simple_prompt.format_messages(query=state["user_query"])
+            )
+
+            state["final_answer"] = response.content
+            state["current_step"] = "simple_answer_generated"
+            state["reasoning_trace"].append("간단한 직접 답변 생성 완료")
+
+        except Exception as e:
+            self.logger.error(f"간단한 답변 생성 실패: {e}")
+            # 폴백 답변
+            if any(greeting in state["user_query"].lower() for greeting in ["안녕", "반가", "hi", "hello"]):
+                state["final_answer"] = "안녕하세요! 무엇을 도와드릴까요?"
+            else:
+                state["final_answer"] = "네, 무엇을 도와드릴까요?"
+            state["current_step"] = "simple_answer_generated"
+
+        return state
+
+    def _create_approval_message(self, state: WorkflowState, approval_type: str, pending_decision: Dict) -> str:
+        """승인 요청 메시지 생성"""
+        if approval_type == HumanApprovalType.TOOL_EXECUTION.value:
+            tool_name = pending_decision.get("tool_name", "unknown")
+            tool_args = pending_decision.get("tool_args", {})
+            return f"""
+🤖 도구 실행 승인 요청
+
+도구명: {tool_name}
+인수: {json.dumps(tool_args, ensure_ascii=False, indent=2)}
+이유: {pending_decision.get('reason', '사용자 요청 처리')}
+
+승인하시겠습니까? (approved/rejected/modified)
+"""
+
+        elif approval_type == HumanApprovalType.LOW_CONFIDENCE.value:
+            confidence = pending_decision.get("confidence", 0.0)
+            return f"""
+⚠️ 낮은 신뢰도 결과 승인 요청
+
+현재 신뢰도: {confidence:.2f}
+결과: {pending_decision.get('result', '')}
+이유: 신뢰도가 임계값({self.hitl_config['confidence_threshold']}) 이하입니다.
+
+계속 진행하시겠습니까? (approved/rejected/need_input)
+"""
+
+        elif approval_type == HumanApprovalType.FINAL_ANSWER.value:
+            answer = pending_decision.get("answer", "")
+            return f"""
+✅ 최종 답변 승인 요청
+
+답변:
+{answer}
+
+이 답변을 사용자에게 제공하시겠습니까? (approved/rejected/modified)
+"""
+
+        else:
+            return f"""
+❓ 승인 요청
+
+내용: {pending_decision.get('content', '알 수 없는 요청')}
+승인하시겠습니까? (approved/rejected)
+"""
+
+    def _decide_after_analysis(self, state: WorkflowState) -> Literal["simple", "complex"]:
+        """분석 단계 후 단순/복잡 쿼리 결정"""
+        current_step = state.get("current_step", "")
+
+        if current_step == "simple_query":
+            self.logger.info("간단한 쿼리로 판단 - 직접 답변 생성")
+            return "simple"
+        else:
+            self.logger.info("복잡한 쿼리로 판단 - 전체 워크플로우 실행")
+            return "complex"
+
+    def _decide_after_planning(self, state: WorkflowState) -> Literal[
+        "execute", "need_approval", "skip_to_synthesize", "end"]:
+        """계획 단계 후 다음 동작 결정 (HITL 포함)"""
         if state["iteration_count"] >= state["max_iterations"]:
-            return "approved"  # 최대 반복 도달 시 강제 승인
+            return "end"
+
+        current_step = state.get("current_step", "")
+
+        if current_step == "plan_skipped":
+            return "skip_to_synthesize"
+        elif current_step == "no_suitable_tools":
+            return "skip_to_synthesize"
+        elif current_step == "plan_ready":
+            # 도구 실행 전 승인이 필요한지 체크
+            if self._needs_approval_for_tools(state):
+                return "need_approval"
+            else:
+                return "execute"
+        elif current_step == "plan_failed":
+            return "end"
+        else:
+            return "execute"
+
+    def _needs_approval_for_tools(self, state: WorkflowState) -> bool:
+        """도구 실행 전 승인이 필요한지 판단"""
+        if not self.hitl_config.get("enabled", False):
+            return False
+
+        if self.hitl_config.get("require_approval_for_tools", False):
+            # 고위험 도구인지 체크
+            high_impact_tools = self.hitl_config.get("high_impact_tools", [])
+            for tool in self.tools:
+                tool_name = getattr(tool, 'name', str(tool))
+                if any(risk_tool in tool_name.lower() for risk_tool in high_impact_tools):
+                    state["pending_decision"] = {
+                        "type": HumanApprovalType.TOOL_EXECUTION.value,
+                        "tool_name": tool_name,
+                        "tool_args": {"query": state["user_query"]},
+                        "reason": "고위험 도구 실행"
+                    }
+                    return True
+
+        return False
+
+    def _decide_after_approval(self, state: WorkflowState) -> Literal["approved", "rejected", "modified", "need_input"]:
+        """Human approval 후 결정"""
+        human_response = state.get("human_response", "approved").lower()
+
+        if "approved" in human_response or "승인" in human_response:
+            return "approved"
+        elif "rejected" in human_response or "거부" in human_response:
+            return "rejected"
+        elif "modified" in human_response or "수정" in human_response:
+            return "modified"
+        elif "input" in human_response or "입력" in human_response:
+            return "need_input"
+        else:
+            return "approved"  # 기본값
+
+    def _decide_next_step(self, state: WorkflowState) -> Literal["continue", "synthesize", "need_approval", "end"]:
+        """다음 단계 결정 (HITL 포함)"""
+        # 먼저 최대 반복 횟수 체크
+        if state["iteration_count"] >= state["max_iterations"]:
+            self.logger.info(f"최대 반복 횟수({state['max_iterations']}) 도달 - 종료")
+            return "end"
+
+        if not state["evaluation_results"]:
+            self.logger.info("평가 결과가 없음 - 계속 진행")
+            return "continue"
+
+        latest_evaluation = state["evaluation_results"][-1]
+        evaluation_type = latest_evaluation.get("evaluation", "")
+        confidence = latest_evaluation.get("confidence", 0.0)
+
+        self.logger.info(
+            f"평가 결과 확인: type={evaluation_type}, confidence={confidence:.2f}, iteration={state['iteration_count']}")
+
+        # 낮은 신뢰도에 대한 Human approval 체크
+        if (self.hitl_config.get("enabled", False) and
+                self.hitl_config.get("require_approval_for_low_confidence", False) and
+                confidence < self.hitl_config.get("confidence_threshold", 0.7)):
+            state["pending_decision"] = {
+                "type": HumanApprovalType.LOW_CONFIDENCE.value,
+                "confidence": confidence,
+                "result": latest_evaluation.get("reason", ""),
+                "evaluation_type": evaluation_type
+            }
+            return "need_approval"
+
+        # 기존 로직
+        if confidence >= 1.0:
+            self.logger.info(f"완벽한 신뢰도({confidence:.2f}) 달성 - 즉시 답변 합성")
+            return "synthesize"
+        elif confidence >= 0.95 and evaluation_type == ToolEvaluationResult.SUCCESS.value:
+            self.logger.info(f"매우 높은 신뢰도({confidence:.2f})와 성공 결과 - 답변 합성")
+            return "synthesize"
+        elif evaluation_type == ToolEvaluationResult.SUCCESS.value and confidence >= 0.8:
+            self.logger.info(f"높은 신뢰도({confidence:.2f})와 성공 결과 - 답변 합성")
+            return "synthesize"
+        elif evaluation_type == ToolEvaluationResult.NEEDS_MORE_INFO.value and confidence < 0.9:
+            self.logger.info(f"추가 정보 필요({confidence:.2f}) - 계속 진행")
+            return "continue"
+        elif confidence >= 0.7:
+            self.logger.info(f"적절한 신뢰도({confidence:.2f}) - 답변 합성")
+            return "synthesize"
+        else:
+            self.logger.info(f"낮은 신뢰도({confidence:.2f}) - 계속 진행")
+            return "continue"
+
+    def _decide_final_step(self, state: WorkflowState) -> Literal["approved", "retry", "need_approval"]:
+        """최종 단계 결정 (HITL 포함)"""
+        if state["iteration_count"] >= state["max_iterations"]:
+            return "approved"
+
+        # 최종 답변 승인이 필요한지 체크
+        if (self.hitl_config.get("enabled", False) and
+                self.hitl_config.get("require_approval_for_final_answer", False)):
+            state["pending_decision"] = {
+                "type": HumanApprovalType.FINAL_ANSWER.value,
+                "answer": state.get("final_answer", "")
+            }
+            return "need_approval"
 
         return state.get("next_action", "approved")
 
-    async def chat_stream(self, message: str, thread_id: str = "default") -> AsyncGenerator[str, None]:
-        """동적 워크플로우 기반 스트리밍 채팅 (최종 답변만 사용자에게 표시)"""
+    async def chat_stream(self, message: str, thread_id: str = "default", hitl_enabled: bool = None) -> AsyncGenerator[
+        str, None]:
+        """Human-in-the-loop 지원 스트리밍 채팅"""
         if not self.workflow:
             yield "워크플로우가 초기화되지 않았습니다."
             return
+
+        # HITL 설정 오버라이드
+        if hitl_enabled is not None:
+            original_hitl = self.hitl_config["enabled"]
+            self.hitl_config["enabled"] = hitl_enabled
 
         # 초기 상태 설정
         initial_state = WorkflowState(
@@ -753,24 +983,28 @@ JSON 형식으로 응답하세요:
             confidence_score=0.0,
             next_action="",
             iteration_count=0,
-            max_iterations=3,  # 최대 반복 횟수를 3으로 줄임
+            max_iterations=3,
             final_answer="",
-            reasoning_trace=[]
+            reasoning_trace=[],
+            # HITL 필드 초기화
+            human_approval_needed=False,
+            human_input_requested=False,
+            human_response=None,
+            pending_decision=None,
+            hitl_enabled=self.hitl_config.get("enabled", False)
         )
 
-        # 재귀 제한을 늘리고 설정
         config = {
-            "configurable": {
-                "thread_id": thread_id
-            },
-            "recursion_limit": 50  # 재귀 제한 증가
+            "configurable": {"thread_id": thread_id},
+            "recursion_limit": 50
         }
 
         try:
-            # 워크플로우 실행 (내부 과정은 로그로만 기록)
             final_state = None
             step_count = 0
-            max_steps = 20  # 추가 안전장치
+            max_steps = 15  # 스텝 수를 더 줄임 (25 -> 15)
+            workflow_completed = False
+            answer_provided = False
 
             async for event in self.workflow.astream(initial_state, config=config):
                 step_count += 1
@@ -779,48 +1013,68 @@ JSON 형식으로 응답하세요:
                     break
 
                 for node_name, node_state in event.items():
-                    # 시스템 로그로 워크플로우 진행 상황 기록
+                    # Human approval이나 input이 필요한 경우 사용자에게 알림
+                    if node_name == "human_approval":
+                        pending_decision = node_state.get("pending_decision", {})
+                        approval_message = self._create_approval_message(node_state,
+                                                                         pending_decision.get("type", ""),
+                                                                         pending_decision)
+                        yield f"\n🤚 **Human Approval 필요**\n{approval_message}\n"
+
+                    elif node_name == "human_input":
+                        yield f"\n💭 **Human Input 필요**\n추가 정보나 지시사항을 제공해주세요.\n"
+
+                    # 시스템 로그
                     if node_state.get("current_step"):
                         self.logger.info(f"워크플로우 단계: {node_state['current_step']} (노드: {node_name}) - 스텝: {step_count}")
 
-                    if node_state.get("reasoning_trace"):
-                        latest_trace = node_state["reasoning_trace"][-1]
-                        self.logger.info(f"추론 과정: {latest_trace}")
-
-                    if node_state.get("tool_results"):
-                        latest_tool = node_state["tool_results"][-1]
-                        self.logger.info(
-                            f"도구 실행: {latest_tool.get('tool_name', 'unknown')} - 성공: {latest_tool.get('success', False)}")
-
-                    if node_state.get("evaluation_results"):
-                        latest_eval = node_state["evaluation_results"][-1]
-                        self.logger.info(
-                            f"평가 결과: {latest_eval.get('evaluation', 'unknown')} (신뢰도: {latest_eval.get('confidence', 0.0):.2f})")
-
-                    # 최종 상태 업데이트
                     final_state = node_state
 
-                    # 조기 종료 조건 체크
-                    if node_state.get("final_answer"):
-                        self.logger.info("최종 답변 생성됨 - 워크플로우 조기 종료")
+                    # 답변이 이미 제공되었는지 체크
+                    if node_state.get("final_answer") and not answer_provided:
+                        # 첫 번째 final_answer가 생성되면 사용자에게 제공
+                        if node_name in ["synthesize_answer", "simple_answer"]:
+                            confidence = node_state.get("confidence_score", 0.0)
+                            iterations = node_state.get("iteration_count", 0)
+                            self.logger.info(f"최종 답변 생성 - 신뢰도: {confidence:.2f}, 반복: {iterations}, 스텝: {step_count}")
+
+                            yield node_state["final_answer"]
+                            answer_provided = True
+
+                            # quality_check가 비활성화되어 있거나 간단한 답변이면 즉시 종료
+                            if (node_name == "simple_answer" or
+                                    not self.hitl_config.get("require_approval_for_final_answer", False)):
+                                self.logger.info("답변 제공 완료 - 워크플로우 조기 종료")
+                                workflow_completed = True
+                                break
+
+                    # quality_check에서 approved가 나오면 종료
+                    elif (node_name == "quality_check" and
+                          node_state.get("next_action") == "approved" and
+                          answer_provided):
+                        self.logger.info("품질 검사 통과 - 워크플로우 종료")
+                        workflow_completed = True
                         break
 
-            # 최종 답변만 사용자에게 스트리밍
-            if final_state and final_state.get("final_answer"):
-                # 최종 로그 기록
-                confidence = final_state.get("confidence_score", 0.0)
-                iterations = final_state.get("iteration_count", 0)
-                self.logger.info(f"워크플로우 완료 - 신뢰도: {confidence:.2f}, 반복 횟수: {iterations}, 총 스텝: {step_count}")
+                # 워크플로우가 완료되면 외부 루프도 종료
+                if workflow_completed:
+                    break
 
-                # 사용자에게는 최종 답변만 전달
+            # 답변이 제공되지 않았다면 마지막으로 시도
+            if not answer_provided and final_state and final_state.get("final_answer"):
+                self.logger.info("마지막 시도로 답변 제공")
                 yield final_state["final_answer"]
-            else:
-                self.logger.warning("워크플로우 실행 완료되었으나 최종 답변이 생성되지 않음")
-                yield "죄송합니다. 요청을 처리하는 중에 문제가 발생했습니다. 다시 시도해 주세요."
+            elif not answer_provided:
+                yield "죄송합니다. 요청을 처리하는 중에 문제가 발생했습니다."
 
         except Exception as e:
-            self.logger.error(f"워크플로우 실행 실패: {e}")
-            yield f"요청을 처리하는 중에 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+            self.logger.error(f"HITL 워크플로우 실행 실패: {e}")
+            yield f"요청을 처리하는 중에 오류가 발생했습니다: {str(e)}"
+
+        finally:
+            # HITL 설정 복원
+            if hitl_enabled is not None:
+                self.hitl_config["enabled"] = original_hitl
 
     def create_model(self, model_name: str):
         """모델 생성"""
@@ -865,7 +1119,7 @@ JSON 형식으로 응답하세요:
             return {"mcpServers": {}}
 
     async def get_agent_status(self) -> Dict[str, Any]:
-        """에이전트 상태 정보"""
+        """에이전트 상태 정보 (HITL 정보 포함)"""
         tools_count = len(self.tools) if self.tools else 0
 
         return {
@@ -874,7 +1128,10 @@ JSON 형식으로 응답하세요:
             "evaluator_model": getattr(self.evaluator_model, 'model_name', 'Unknown') if self.evaluator_model else None,
             "tools_count": tools_count,
             "mcp_client_active": self.mcp_client is not None,
-            "workflow_active": self.workflow is not None
+            "workflow_active": self.workflow is not None,
+            # HITL 상태 정보
+            "hitl_config": self.hitl_config,
+            "human_input_callback_set": self.human_input_callback is not None
         }
 
     async def cleanup_mcp_client(self):
