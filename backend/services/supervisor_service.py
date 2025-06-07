@@ -18,7 +18,7 @@ from enum import Enum
 
 
 class WorkflowState(TypedDict):
-    """워크플로우 상태 정의"""
+    """워크플로우 상태 정의 - pending_decision을 별도로 관리"""
     messages: List[Any]
     user_query: str
     current_step: str
@@ -34,8 +34,11 @@ class WorkflowState(TypedDict):
     human_approval_needed: bool
     human_input_requested: bool
     human_response: Optional[str]
-    pending_decision: Optional[Dict[str, Any]]
+    pending_decision: Optional[Dict[str, Any]]  # TypedDict에서도 명시적으로 정의
     hitl_enabled: bool
+    # 추가 HITL 상태 관리
+    approval_type: Optional[str]
+    approval_message: Optional[str]
 
 
 class ToolEvaluationResult(Enum):
@@ -76,16 +79,48 @@ class SupervisorService:
             "high_impact_tools": ["file_operations", "external_api_calls", "system_commands"]  # 고위험 도구
         }
 
-        # Human input callback
-        self.human_input_callback: Optional[Callable] = None
+        # Human input callback - 기본 callback 설정
+        self.human_input_callback: Optional[Callable] = self._default_human_input_callback
+
+        # Human input queue for async communication
+        self.human_input_queue = asyncio.Queue()
+        self.waiting_for_human_input = False
+        self.pending_approval_message = None
+        self.pending_approval_context = None
 
         # 로깅 설정
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
 
+    def _default_human_input_callback(self, message: str, context: Dict) -> str:
+        """기본 human input callback - 비동기 대기를 위한 플래그 설정"""
+        self.logger.info("기본 human input callback 호출됨 - 비동기 입력 대기 모드")
+
+        # 사용자에게 보여질 메시지를 저장
+        self.pending_approval_message = message
+        self.pending_approval_context = context
+
+        # 비동기 입력 대기를 위한 특별한 플래그 반환
+        return "__WAIT_FOR_ASYNC_INPUT__"
+
     def set_human_input_callback(self, callback: Callable[[str, Dict], str]):
         """Human input callback 설정"""
+        if callback is None:
+            self.logger.warning("None callback 전달됨 - 기본 callback 유지")
+            return
+
         self.human_input_callback = callback
+        self.logger.info(f"Human input callback 설정 완료: {callback}")
+
+    def get_pending_approval_info(self) -> Dict[str, Any]:
+        """현재 대기 중인 승인 정보 반환"""
+        if self.waiting_for_human_input:
+            return {
+                "waiting": True,
+                "message": self.pending_approval_message,
+                "context": self.pending_approval_context
+            }
+        return {"waiting": False}
 
     def configure_hitl(self, **config):
         """Human-in-the-loop 설정 업데이트"""
@@ -97,13 +132,33 @@ class SupervisorService:
                                evaluator_model_name: Optional[str] = None,
                                mcp_config: Optional[Dict] = None,
                                system_prompt: Optional[str] = None,
-                               hitl_enabled: bool = True):
+                               hitl_enabled: bool = True,
+                               human_input_callback: Optional[Callable] = None):
         """동적 워크플로우 에이전트 초기화"""
         try:
             self.logger.info(f"HITL 지원 동적 워크플로우 에이전트 초기화 시작: {model_name}")
 
-            # HITL 설정
+            # Human input callback 설정
+            if human_input_callback:
+                self.set_human_input_callback(human_input_callback)
+                self.logger.info("초기화 시 human input callback 설정됨")
+
+            # HITL 설정 (더 정확한 키워드로 수정)
             self.hitl_config["enabled"] = hitl_enabled
+            if hitl_enabled:
+                self.hitl_config.update({
+                    "require_approval_for_tools": True,  # 도구 승인 활성화
+                    "require_approval_for_low_confidence": True,  # 낮은 신뢰도 승인 활성화
+                    "confidence_threshold": 0.8,  # 임계값을 높여서 더 자주 트리거
+                    # 더 구체적이고 명확한 고위험 키워드
+                    "high_impact_tools": [
+                        "삭제", "제거", "지우", "delete", "remove", "rm",
+                        "파괴", "destroy", "kill", "terminate",
+                        "포맷", "format", "초기화", "reset",
+                        "수정", "변경", "modify", "edit", "change",
+                        "시스템", "system", "관리자", "admin", "root"
+                    ]
+                })
 
             # 기존 클라이언트 정리
             await self.cleanup_mcp_client()
@@ -126,6 +181,8 @@ class SupervisorService:
             self.workflow = self._create_dynamic_workflow()
 
             self.logger.info(f"HITL 지원 동적 워크플로우 에이전트 초기화 완료. 도구 {len(self.tools)}개 로드됨")
+            self.logger.info(f"HITL 고위험 키워드: {self.hitl_config.get('high_impact_tools', [])}")
+            self.logger.info(f"Human input callback 상태: {'설정됨' if self.human_input_callback else '미설정'}")
             return True
 
         except Exception as e:
@@ -392,36 +449,164 @@ JSON 형식으로 응답하세요:
         return state
 
     async def _human_approval(self, state: WorkflowState) -> WorkflowState:
-        """Human approval 요청 처리"""
-        self.logger.info("Human approval 요청 중...")
+        """Human approval 요청 처리 - 강화된 디버깅 및 상태 보존"""
+        self.logger.info("=== Human approval 요청 시작 ===")
+
+        # 상태 정보 더 자세히 로깅
+        pending_decision = state.get("pending_decision")
+        approval_type = state.get("approval_type")
+        approval_message = state.get("approval_message")
+
+        self.logger.info(f"상태 확인:")
+        self.logger.info(f"  - pending_decision 존재: {pending_decision is not None}")
+        self.logger.info(f"  - pending_decision 타입: {type(pending_decision)}")
+        self.logger.info(f"  - approval_type: {approval_type}")
+        self.logger.info(f"  - approval_message 존재: {approval_message is not None}")
+        self.logger.info(f"  - human_approval_needed: {state.get('human_approval_needed')}")
+        self.logger.info(f"  - human_input_callback 존재: {self.human_input_callback is not None}")
+
+        # pending_decision이 None인 경우 상태 전체를 로깅
+        if pending_decision is None:
+            self.logger.error("⚠️ pending_decision이 None입니다!")
+            self.logger.error("현재 상태의 모든 키:")
+            for key, value in state.items():
+                if key in ["pending_decision", "approval_type", "approval_message", "human_approval_needed"]:
+                    self.logger.error(f"  {key}: {value} (타입: {type(value)})")
+
+            # 긴급 복구 시도
+            self.logger.info("긴급 pending_decision 복구 시도...")
+            emergency_decision = {
+                "type": HumanApprovalType.TOOL_EXECUTION.value,
+                "tool_name": "emergency_recovery",
+                "tool_args": {"query": state["user_query"]},
+                "reason": "상태 손실로 인한 긴급 복구",
+                "keywords": ["삭제"],  # 로그에서 감지된 키워드
+                "available_tools": [getattr(tool, 'name', str(tool)) for tool in self.tools] if self.tools else [],
+                "risk_level": "high"
+            }
+
+            state["pending_decision"] = emergency_decision
+            pending_decision = emergency_decision
+            self.logger.info(f"긴급 복구 완료: {emergency_decision}")
+
+        # pending_decision 내용 상세 로깅
+        if pending_decision:
+            self.logger.info(f"pending_decision 상세 내용:")
+            for key, value in pending_decision.items():
+                self.logger.info(f"  {key}: {value}")
 
         if not self.hitl_config.get("enabled", False):
             self.logger.info("HITL이 비활성화됨 - 자동 승인")
             state["human_response"] = "approved"
             return state
 
-        pending_decision = state.get("pending_decision", {})
-        approval_type = pending_decision.get("type", "unknown")
+        # 승인 메시지 준비 - 우선순위에 따른 처리
+        final_approval_message = None
 
-        # 승인 요청 메시지 구성
-        approval_message = self._create_approval_message(state, approval_type, pending_decision)
+        # 1순위: 미리 설정된 approval_message 사용
+        if approval_message:
+            final_approval_message = approval_message
+            self.logger.info("미리 설정된 approval_message 사용")
+
+        # 2순위: pending_decision으로부터 메시지 생성
+        elif pending_decision:
+            try:
+                final_approval_message = self._create_approval_message(
+                    state,
+                    pending_decision.get("type", "unknown"),
+                    pending_decision
+                )
+                self.logger.info("pending_decision으로부터 승인 메시지 생성")
+            except Exception as e:
+                self.logger.error(f"승인 메시지 생성 실패: {e}")
+                # 폴백 메시지 생성
+                final_approval_message = self._create_fallback_approval_message(state, pending_decision)
+
+        # 3순위: 기본 폴백 메시지
+        else:
+            self.logger.warning("승인 정보가 없음 - 기본 메시지 사용")
+            final_approval_message = f"""⚠️ 작업 승인이 필요합니다.
+
+요청: {state['user_query']}
+
+이 작업은 승인이 필요합니다. 진행하시겠습니까? (approved/rejected)"""
+
+        # 승인 메시지 로깅 (전체 내용)
+        self.logger.info(f"최종 승인 메시지:\n{final_approval_message}")
 
         try:
             if self.human_input_callback:
                 # Callback을 통해 human input 요청
-                human_response = self.human_input_callback(approval_message, pending_decision)
-                state["human_response"] = human_response
-                state["reasoning_trace"].append(f"Human approval 응답: {human_response}")
+                self.logger.info("Human input callback 호출 중...")
+
+                # 비동기 환경 체크
+                try:
+                    # 비동기 queue 방식 시도
+                    self.waiting_for_human_input = True
+
+                    # Callback 호출
+                    human_response = self.human_input_callback(final_approval_message, pending_decision or {})
+
+                    # 특별한 플래그 체크 - 비동기 입력 대기
+                    if human_response == "__WAIT_FOR_ASYNC_INPUT__":
+                        self.logger.info("비동기 입력 대기 모드 진입")
+                        self.waiting_for_human_input = True
+
+                        # 비동기 응답 대기
+                        try:
+                            human_response = await asyncio.wait_for(
+                                self.human_input_queue.get(),
+                                timeout=300.0  # 5분 timeout
+                            )
+                            state["human_response"] = human_response
+                            self.logger.info(f"Human 비동기 응답 수신: {human_response}")
+                        except asyncio.TimeoutError:
+                            self.logger.error("Human input timeout - 안전을 위해 자동 거부")
+                            state["human_response"] = "rejected"
+                            state["reasoning_trace"].append("Human input timeout으로 인한 자동 거부")
+                    elif isinstance(human_response, str):
+                        # 일반 문자열 응답 (커스텀 callback의 경우)
+                        state["human_response"] = human_response
+                        self.logger.info(f"Human callback 동기 응답 수신: {human_response}")
+                    else:
+                        # 예상치 못한 응답 타입
+                        self.logger.warning(f"예상치 못한 callback 응답 타입: {type(human_response)}")
+                        state["human_response"] = "rejected"
+
+                except Exception as e:
+                    self.logger.error(f"Human input callback 실행 중 오류: {e}")
+                    # 안전을 위해 거부
+                    state["human_response"] = "rejected"
+                    state["reasoning_trace"].append(f"Human input callback 오류로 인한 자동 거부: {str(e)}")
+
+                finally:
+                    self.waiting_for_human_input = False
+
+                state["reasoning_trace"].append(f"Human approval 응답: {state.get('human_response', 'none')}")
+
             else:
-                # Callback이 없으면 자동 승인 (개발/테스트 용)
-                self.logger.warning("Human input callback이 설정되지 않음 - 자동 승인")
-                state["human_response"] = "approved"
+                # Human input callback이 설정되지 않은 경우
+                self.logger.error("⚠️ 치명적 오류: Human input callback이 설정되지 않음!")
+                self.logger.error("고위험 작업이지만 callback이 없어 승인을 받을 수 없습니다.")
+
+                # 안전을 위해 거부 처리
+                state["human_response"] = "rejected"
+                state["reasoning_trace"].append("Human input callback 부재로 인한 자동 거부")
+                self.logger.info("안전을 위해 자동 거부 처리됨")
 
         except Exception as e:
             self.logger.error(f"Human approval 처리 실패: {e}")
-            state["human_response"] = "approved"  # 실패 시 자동 승인
+            # 실패 시에도 자동 승인이 아닌 거부 처리
+            state["human_response"] = "rejected"
+            state["reasoning_trace"].append(f"Human approval 처리 실패로 인한 자동 거부: {str(e)}")
 
+        # 상태 초기화
         state["human_approval_needed"] = False
+        # pending_decision은 디버깅을 위해 보존 (필요시)
+        # state["pending_decision"] = None  # 주석 처리
+        # state["approval_message"] = None  # 주석 처리
+
+        self.logger.info(f"=== Human approval 완료: {state.get('human_response')} ===")
         return state
 
     async def _human_input(self, state: WorkflowState) -> WorkflowState:
@@ -779,51 +964,80 @@ JSON 형식으로 응답하세요:
 
         return state
 
+    def _create_fallback_approval_message(self, state: WorkflowState, pending_decision: Dict) -> str:
+        """폴백 승인 메시지 생성"""
+        keywords = pending_decision.get("keywords", [])
+        tool_name = pending_decision.get("tool_name", "알 수 없는 도구")
+        risk_level = pending_decision.get("risk_level", "보통")
+
+        risk_emoji = "🔴" if risk_level == "high" else "🟡"
+
+        return f"""{risk_emoji} 고위험 작업 승인 요청
+
+감지된 키워드: {', '.join(keywords) if keywords else '없음'}
+실행 도구: {tool_name}
+요청 내용: {state['user_query']}
+위험도: {risk_level}
+
+이 작업을 진행하시겠습니까? (approved/rejected/modified)"""
+
     def _create_approval_message(self, state: WorkflowState, approval_type: str, pending_decision: Dict) -> str:
-        """승인 요청 메시지 생성"""
+        """승인 요청 메시지 생성 - 개선된 버전"""
+        if not pending_decision:
+            return "승인이 필요합니다. (approved/rejected)"
+
         if approval_type == HumanApprovalType.TOOL_EXECUTION.value:
             tool_name = pending_decision.get("tool_name", "unknown")
             tool_args = pending_decision.get("tool_args", {})
-            return f"""
-🤖 도구 실행 승인 요청
+            reason = pending_decision.get("reason", "사용자 요청 처리")
+            keywords = pending_decision.get("keywords", [])
+            available_tools = pending_decision.get("available_tools", [])
+            risk_level = pending_decision.get("risk_level", "보통")
 
-도구명: {tool_name}
-인수: {json.dumps(tool_args, ensure_ascii=False, indent=2)}
-이유: {pending_decision.get('reason', '사용자 요청 처리')}
+            # 위험도에 따른 이모지 선택
+            risk_emoji = "🔴" if risk_level == "high" else "🟡"
 
-승인하시겠습니까? (approved/rejected/modified)
-"""
+            # 더 자세한 승인 메시지
+            message = f"""{risk_emoji} 고위험 도구 실행 승인 요청
+
+감지된 키워드: {', '.join(keywords) if keywords else '없음'}
+실행 예정 도구: {tool_name}
+사용 가능한 도구들: {', '.join(available_tools) if available_tools else '없음'}
+실행 인수: {json.dumps(tool_args, ensure_ascii=False, indent=2)}
+감지 이유: {reason}
+위험도: {risk_level}
+
+⚠️ 이 작업은 시스템에 영향을 줄 수 있습니다.
+정말로 진행하시겠습니까? (approved/rejected/modified)"""
+
+            return message
 
         elif approval_type == HumanApprovalType.LOW_CONFIDENCE.value:
             confidence = pending_decision.get("confidence", 0.0)
-            return f"""
-⚠️ 낮은 신뢰도 결과 승인 요청
+            result = pending_decision.get("result", "")
+            return f"""⚠️ 낮은 신뢰도 결과 승인 요청
 
 현재 신뢰도: {confidence:.2f}
-결과: {pending_decision.get('result', '')}
-이유: 신뢰도가 임계값({self.hitl_config['confidence_threshold']}) 이하입니다.
+결과: {result}
+이유: 신뢰도가 임계값({self.hitl_config.get('confidence_threshold', 0.7)}) 이하입니다.
 
-계속 진행하시겠습니까? (approved/rejected/need_input)
-"""
+계속 진행하시겠습니까? (approved/rejected/need_input)"""
 
         elif approval_type == HumanApprovalType.FINAL_ANSWER.value:
             answer = pending_decision.get("answer", "")
-            return f"""
-✅ 최종 답변 승인 요청
+            return f"""✅ 최종 답변 승인 요청
 
 답변:
 {answer}
 
-이 답변을 사용자에게 제공하시겠습니까? (approved/rejected/modified)
-"""
+이 답변을 사용자에게 제공하시겠습니까? (approved/rejected/modified)"""
 
         else:
-            return f"""
-❓ 승인 요청
+            content = pending_decision.get("content", "알 수 없는 요청")
+            return f"""❓ 승인 요청
 
-내용: {pending_decision.get('content', '알 수 없는 요청')}
-승인하시겠습니까? (approved/rejected)
-"""
+내용: {content}
+승인하시겠습니까? (approved/rejected)"""
 
     def _decide_after_analysis(self, state: WorkflowState) -> Literal["simple", "complex"]:
         """분석 단계 후 단순/복잡 쿼리 결정"""
@@ -838,7 +1052,7 @@ JSON 형식으로 응답하세요:
 
     def _decide_after_planning(self, state: WorkflowState) -> Literal[
         "execute", "need_approval", "skip_to_synthesize", "end"]:
-        """계획 단계 후 다음 동작 결정 (HITL 포함)"""
+        """계획 단계 후 다음 동작 결정 (HITL 포함) - 수정된 버전"""
         if state["iteration_count"] >= state["max_iterations"]:
             return "end"
 
@@ -851,6 +1065,29 @@ JSON 형식으로 응답하세요:
         elif current_step == "plan_ready":
             # 도구 실행 전 승인이 필요한지 체크
             if self._needs_approval_for_tools(state):
+                self.logger.info("도구 승인 필요 - human_approval로 분기")
+                # pending_decision이 제대로 설정되었는지 확인
+                pending_decision = state.get("pending_decision")
+                if pending_decision:
+                    self.logger.info(f"pending_decision 확인됨: {pending_decision}")
+                    # 상태 정보를 더 명확하게 로깅
+                    self.logger.info(f"approval_type: {state.get('approval_type')}")
+                    self.logger.info(f"approval_message 존재: {state.get('approval_message') is not None}")
+                else:
+                    self.logger.error("pending_decision이 설정되지 않음!")
+                    # 긴급 상황 처리 - 강제로 pending_decision 생성
+                    state["pending_decision"] = {
+                        "type": HumanApprovalType.TOOL_EXECUTION.value,
+                        "tool_name": "emergency_approval",
+                        "tool_args": {"query": state["user_query"]},
+                        "reason": "긴급 승인 필요",
+                        "keywords": ["삭제", "제거"],  # 기본 고위험 키워드
+                        "available_tools": [getattr(tool, 'name', str(tool)) for tool in
+                                            self.tools] if self.tools else [],
+                        "risk_level": "high"
+                    }
+                    state["approval_type"] = HumanApprovalType.TOOL_EXECUTION.value
+                    self.logger.info("긴급 pending_decision 생성됨")
                 return "need_approval"
             else:
                 return "execute"
@@ -860,24 +1097,87 @@ JSON 형식으로 응답하세요:
             return "execute"
 
     def _needs_approval_for_tools(self, state: WorkflowState) -> bool:
-        """도구 실행 전 승인이 필요한지 판단"""
+        """도구 실행 전 승인이 필요한지 판단 - 강화된 상태 관리"""
         if not self.hitl_config.get("enabled", False):
+            self.logger.info("HITL이 비활성화됨")
             return False
 
         if self.hitl_config.get("require_approval_for_tools", False):
-            # 고위험 도구인지 체크
-            high_impact_tools = self.hitl_config.get("high_impact_tools", [])
-            for tool in self.tools:
-                tool_name = getattr(tool, 'name', str(tool))
-                if any(risk_tool in tool_name.lower() for risk_tool in high_impact_tools):
-                    state["pending_decision"] = {
-                        "type": HumanApprovalType.TOOL_EXECUTION.value,
-                        "tool_name": tool_name,
-                        "tool_args": {"query": state["user_query"]},
-                        "reason": "고위험 도구 실행"
-                    }
-                    return True
+            # 사용자 쿼리에서 고위험 키워드 체크 (더 정확한 매칭)
+            query_lower = state["user_query"].lower()
+            high_impact_keywords = self.hitl_config.get("high_impact_tools", [])
 
+            # 쿼리에서 고위험 키워드가 직접 언급된 경우만 체크
+            detected_keywords = []
+            for keyword in high_impact_keywords:
+                if keyword.lower() in query_lower:
+                    detected_keywords.append(keyword)
+
+            if detected_keywords:
+                self.logger.info(f"쿼리에서 고위험 키워드 감지: {detected_keywords}")
+
+                # 실제 사용 가능한 도구 확인
+                available_tools = []
+                if self.tools:
+                    for tool in self.tools:
+                        tool_name = getattr(tool, 'name', str(tool))
+                        available_tools.append(tool_name)
+
+                # 가장 적합한 도구 선택 또는 일반적인 고위험 작업으로 분류
+                if available_tools:
+                    # 첫 번째 사용 가능한 도구를 대표 도구로 사용
+                    representative_tool = available_tools[0]
+                    tool_description = f"'{representative_tool}' 도구를 통한 고위험 작업"
+                else:
+                    representative_tool = "system_operation"
+                    tool_description = "시스템 작업"
+
+                # 승인 메시지 생성
+                approval_message = f"""🔴 고위험 작업 승인 요청
+
+감지된 키워드: {', '.join(detected_keywords)}
+실행 예정 도구: {representative_tool}
+작업 내용: {tool_description}
+요청 내용: {state['user_query']}
+위험도: 높음
+
+⚠️ 이 작업은 시스템에 영향을 줄 수 있습니다.
+정말로 진행하시겠습니까? (approved/rejected/modified)"""
+
+                # pending_decision 생성 - 실제 도구 정보 사용
+                pending_decision = {
+                    "type": HumanApprovalType.TOOL_EXECUTION.value,
+                    "tool_name": representative_tool if available_tools else "고위험_시스템_작업",
+                    "tool_args": {"query": state["user_query"]},
+                    "reason": f"고위험 키워드 감지: {', '.join(detected_keywords)}",
+                    "keywords": detected_keywords,
+                    "available_tools": available_tools,
+                    "risk_level": "high"
+                }
+
+                # 상태에 여러 방식으로 저장 (안전성 확보) - 명시적으로 상태 업데이트
+                state["pending_decision"] = pending_decision
+                state["approval_type"] = HumanApprovalType.TOOL_EXECUTION.value
+                state["approval_message"] = approval_message
+                state["human_approval_needed"] = True
+
+                # 상태 설정 확인 로깅
+                self.logger.info(f"HITL 상태 설정 완료:")
+                self.logger.info(f"  - 도구: {representative_tool}")
+                self.logger.info(f"  - 키워드: {detected_keywords}")
+                self.logger.info(f"  - pending_decision 타입: {type(state.get('pending_decision'))}")
+                self.logger.info(f"  - pending_decision 내용: {state.get('pending_decision')}")
+
+                # 즉시 상태 검증
+                if state.get("pending_decision") is None:
+                    self.logger.error("⚠️ 치명적 오류: pending_decision 설정 실패!")
+                    # 강제로 다시 설정
+                    state["pending_decision"] = pending_decision
+                    self.logger.info("pending_decision 강제 재설정 완료")
+
+                return True
+
+        self.logger.info("고위험 키워드가 감지되지 않음 - 승인 불필요")
         return False
 
     def _decide_after_approval(self, state: WorkflowState) -> Literal["approved", "rejected", "modified", "need_input"]:
@@ -973,7 +1273,7 @@ JSON 형식으로 응답하세요:
             original_hitl = self.hitl_config["enabled"]
             self.hitl_config["enabled"] = hitl_enabled
 
-        # 초기 상태 설정
+        # 초기 상태 설정 - 모든 필드 명시적으로 설정
         initial_state = WorkflowState(
             messages=[HumanMessage(content=message)],
             user_query=message,
@@ -991,7 +1291,10 @@ JSON 형식으로 응답하세요:
             human_input_requested=False,
             human_response=None,
             pending_decision=None,
-            hitl_enabled=self.hitl_config.get("enabled", False)
+            hitl_enabled=self.hitl_config.get("enabled", False),
+            # 추가 HITL 상태
+            approval_type=None,
+            approval_message=None
         )
 
         config = {
@@ -1002,7 +1305,7 @@ JSON 형식으로 응답하세요:
         try:
             final_state = None
             step_count = 0
-            max_steps = 15  # 스텝 수를 더 줄임 (25 -> 15)
+            max_steps = 15
             workflow_completed = False
             answer_provided = False
 
@@ -1015,18 +1318,74 @@ JSON 형식으로 응답하세요:
                 for node_name, node_state in event.items():
                     # Human approval이나 input이 필요한 경우 사용자에게 알림
                     if node_name == "human_approval":
-                        pending_decision = node_state.get("pending_decision", {})
-                        approval_message = self._create_approval_message(node_state,
-                                                                         pending_decision.get("type", ""),
-                                                                         pending_decision)
-                        yield f"\n🤚 **Human Approval 필요**\n{approval_message}\n"
+                        try:
+                            # 안전한 승인 메시지 추출
+                            approval_message = None
+
+                            if node_state.get("approval_message"):
+                                approval_message = str(node_state["approval_message"])
+                            elif node_state.get("pending_decision"):
+                                pending_decision = node_state["pending_decision"]
+                                if isinstance(pending_decision, dict):
+                                    approval_message = f"""🤖 고위험 작업 승인 요청
+
+작업: {pending_decision.get('tool_name', 'unknown')}
+요청: {node_state.get('user_query', 'unknown')}
+이유: {pending_decision.get('reason', 'unknown')}
+
+승인하시겠습니까? (approved/rejected)"""
+                            else:
+                                approval_message = f"""🤖 작업 승인 요청
+
+요청: {node_state.get('user_query', 'unknown')}
+승인하시겠습니까? (approved/rejected)"""
+
+                            if approval_message:
+                                yield f"\n🤚 **Human Approval 필요**\n{approval_message}\n"
+                                self.logger.info("Human Approval 메시지 전송됨")
+                            else:
+                                self.logger.warning("Human Approval 메시지를 생성할 수 없음")
+
+                        except Exception as e:
+                            self.logger.error(f"Human Approval 메시지 처리 실패: {e}")
+                            # 안전한 폴백 메시지
+                            fallback_message = f"🤖 작업 승인이 필요합니다.\n요청: {message}\n승인하시겠습니까? (approved/rejected)"
+                            yield f"\n🤚 **Human Approval 필요**\n{fallback_message}\n"
 
                     elif node_name == "human_input":
                         yield f"\n💭 **Human Input 필요**\n추가 정보나 지시사항을 제공해주세요.\n"
+                        self.logger.info("Human Input 메시지 전송됨")
 
                     # 시스템 로그
                     if node_state.get("current_step"):
                         self.logger.info(f"워크플로우 단계: {node_state['current_step']} (노드: {node_name}) - 스텝: {step_count}")
+
+                    # 평가 결과에서 낮은 신뢰도 감지 시 즉시 HITL 트리거
+                    if (node_name == "evaluate_results" and
+                            node_state.get("evaluation_results") and
+                            not answer_provided):
+
+                        try:
+                            latest_eval = node_state["evaluation_results"][-1]
+                            confidence = latest_eval.get("confidence", 1.0)
+
+                            if (self.hitl_config.get("enabled", False) and
+                                    self.hitl_config.get("require_approval_for_low_confidence", False) and
+                                    confidence < self.hitl_config.get("confidence_threshold", 0.7)):
+                                self.logger.info(f"낮은 신뢰도({confidence:.2f}) 감지 - 즉시 HITL 트리거")
+
+                                hitl_message = f"""⚠️ 낮은 신뢰도 결과 승인 요청
+
+현재 신뢰도: {confidence:.2f}
+결과: {latest_eval.get('reason', '신뢰도가 낮습니다')}
+이유: 신뢰도가 임계값({self.hitl_config.get('confidence_threshold', 0.7)}) 이하입니다.
+
+계속 진행하시겠습니까? (approved/rejected/need_input)"""
+
+                                yield f"\n🤚 **Human Approval 필요**\n{hitl_message}\n"
+                                self.logger.info("낮은 신뢰도 HITL 트리거됨")
+                        except Exception as e:
+                            self.logger.error(f"신뢰도 기반 HITL 처리 실패: {e}")
 
                     final_state = node_state
 
@@ -1069,6 +1428,8 @@ JSON 형식으로 응답하세요:
 
         except Exception as e:
             self.logger.error(f"HITL 워크플로우 실행 실패: {e}")
+            import traceback
+            self.logger.error(f"상세 오류: {traceback.format_exc()}")
             yield f"요청을 처리하는 중에 오류가 발생했습니다: {str(e)}"
 
         finally:
