@@ -1,4 +1,5 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, HTTPException
+from core.input_filter import InputFilter
 from pydantic import BaseModel
 from typing import List
 import os
@@ -22,40 +23,43 @@ class FilterRuleModel(Base):
 
 Base.metadata.create_all(engine)
 
-app = FastAPI()
+router = APIRouter()
 
 class FilterRule(BaseModel):
     id: int | None = None
     name: str
     pattern: str
 
-@app.get("/filters", response_model=List[FilterRule])
+@router.get("/filters", response_model=List[FilterRule])
 def get_filters():
     with SessionLocal() as session:
         rules = session.query(FilterRuleModel).all()
         return [FilterRule(id=r.id, name=r.name, pattern=r.pattern) for r in rules]
 
-@app.put("/filters")
+@router.put("/filters")
 def replace_filters(rules: List[FilterRule]):
     with SessionLocal() as session:
         session.query(FilterRuleModel).delete()
         session.bulk_save_objects([FilterRuleModel(name=r.name, pattern=r.pattern) for r in rules])
         session.commit()
+    InputFilter.load_rules()
     return {"status": "ok"}
 
-@app.post("/filters", response_model=FilterRule)
+@router.post("/filters", response_model=FilterRule)
 def add_filter(rule: FilterRule):
     with SessionLocal() as session:
         obj = FilterRuleModel(name=rule.name, pattern=rule.pattern)
         session.add(obj)
         session.commit()
+    InputFilter.load_rules()
     return rule
 
-@app.delete("/filters/{rule_id}")
+@router.delete("/filters/{rule_id}")
 def delete_filter(rule_id: int):
     with SessionLocal() as session:
         deleted = session.query(FilterRuleModel).filter(FilterRuleModel.id == rule_id).delete()
         session.commit()
         if not deleted:
             raise HTTPException(status_code=404, detail="Filter not found")
+    InputFilter.load_rules()
     return {"status": "deleted"}
