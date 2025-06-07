@@ -22,7 +22,7 @@ class MCPAgentService:
         self.checkpointer = InMemorySaver()
         
     async def initialize_agent(self, 
-                              model_name: str = "gemma3",
+                              model_name: str = "claude-3-5-sonnet-latest",
                               mcp_config: Optional[Dict] = None,
                               system_prompt: Optional[str] = None):
         """에이전트 초기화"""
@@ -81,11 +81,6 @@ class MCPAgentService:
                 model=model_name,
                 temperature=0.1,
                 max_tokens=output_tokens.get(model_name, 16000)
-            )
-        elif model_name.startswith("gemma3"):
-            return ChatOllama(
-                model="gemma3:27b",
-                temperature=0.1
             )
         else:
             raise ValueError(f"지원하지 않는 모델: {model_name}")

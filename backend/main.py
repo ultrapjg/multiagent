@@ -6,7 +6,9 @@ from pydantic import BaseModel
 from typing import Optional, Dict, Any
 import json
 import asyncio
+import logging
 
+from services.supervisor_service import SupervisorService
 from services.message_service import MessageService
 from database import init_db
 from core.agent_service import MCPAgentService
@@ -30,6 +32,7 @@ app.include_router(messages_router, prefix="/messages", tags=["messages"])
 # 서비스 인스턴스
 agent_service = MCPAgentService()
 tool_service = MCPToolService()
+supervisor_service = SupervisorService()
 
 # 보안
 security = HTTPBearer()
@@ -73,6 +76,7 @@ async def startup_event():
 
         """서버 시작 시 에이전트 초기화"""
         await agent_service.initialize_agent()
+        await supervisor_service.initialize_agent()
     except Exception as e:
         print(f"❌ 데이터베이스 초기화 실패: {e}")
         raise e
@@ -213,6 +217,48 @@ async def get_admin_stats(admin=Depends(get_admin_user)):
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "service": "LangGraph MCP Agents"}
+
+
+@app.websocket("/user/chat")
+async def websocket_chat(websocket: WebSocket):
+    """실시간 채팅 웹소켓"""
+    await websocket.accept()
+
+    try:
+        while True:
+            # 사용자 메시지 수신
+            data = await websocket.receive_text()
+            message_data = json.loads(data)
+            message = message_data.get("message", "")
+            thread_id = message_data.get("thread_id", "default")
+
+            result = MessageService.create_message(message, "admin")
+
+            # 에이전트가 초기화되지 않은 경우 자동 초기화
+            if not agent_service.agent:
+                await supervisor_service.initialize_agent()
+
+            # 스트리밍 응답 전송
+            async for chunk in supervisor_service.chat_stream(message, thread_id):
+                await websocket.send_text(json.dumps({
+                    "type": "response_chunk",
+                    "data": chunk,
+                    "thread_id": thread_id
+                }))
+
+            # 완료 신호
+            await websocket.send_text(json.dumps({
+                "type": "response_complete",
+                "thread_id": thread_id
+            }))
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        await websocket.send_text(json.dumps({
+            "type": "error",
+            "data": f"오류 발생: {str(e)}"
+        }))
 
 
 if __name__ == "__main__":

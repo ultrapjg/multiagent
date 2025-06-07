@@ -100,7 +100,7 @@ def main():
             full_response = ""
             
             # 웹소켓 클라이언트 생성 및 연결
-            client = UserWebSocketClient("ws://localhost:8000/api/user/chat")
+            client = UserWebSocketClient("ws://localhost:8000/user/chat")
             
             if client.connect():
                 # 메시지 전송
