@@ -191,7 +191,14 @@ async def websocket_endpoint_user(websocket: WebSocket):
                                 "data": "워크플로우 재개됨"
                             })
                         except Exception as e:
-                            print(f"❌ 승인 처리 실패: {e}")
+                            error_str = str(e)
+                            if "(1000," in error_str:
+                                print(f"✅ [{thread_id if 'thread_id' in locals() else 'unknown'}] WebSocket 정상 종료")
+                            elif "connection closed" in error_str.lower():
+                                print(f"ℹ️ [{thread_id if 'thread_id' in locals() else 'unknown'}] WebSocket 연결 종료")
+                            else:
+                                print(f"❌ [{thread_id if 'thread_id' in locals() else 'unknown'}] 실제 처리 오류: {e}")
+                            break
 
                 # 일반 메시지 처리
                 elif message and not message.startswith("["):
@@ -211,7 +218,13 @@ async def websocket_endpoint_user(websocket: WebSocket):
                 continue
 
             except Exception as e:
-                print(f"❌ 메시지 처리 오류: {e}")
+                error_str = str(e)
+                if "(1000," in error_str:
+                    print(f"✅ [{thread_id if 'thread_id' in locals() else 'unknown'}] WebSocket 정상 종료")
+                elif "connection closed" in error_str.lower():
+                    print(f"ℹ️ [{thread_id if 'thread_id' in locals() else 'unknown'}] WebSocket 연결 종료")
+                else:
+                    print(f"❌ [{thread_id if 'thread_id' in locals() else 'unknown'}] 실제 처리 오류: {e}")
                 break
 
     except WebSocketDisconnect:

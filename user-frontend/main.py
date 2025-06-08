@@ -449,31 +449,98 @@ def main():
                         response_placeholder = st.empty()
                         full_response = ""
 
-                        # 승인 후 계속되는 응답 수신
-                        while True:
-                            response_data = st.session_state.current_ws_client.receive_response()
-                            if response_data is None:
-                                break
+                        # 초기 대기 메시지
+                        response_placeholder.markdown("🔄 승인 처리 중... 서버 응답 대기")
 
-                            if response_data["type"] == "response_chunk":
-                                chunk = response_data["data"]
-                                full_response += chunk
-                                response_placeholder.markdown(full_response + "▌")
-                                time.sleep(0.01)
-                            elif response_data["type"] == "response_complete":
-                                break
-                            elif response_data["type"] == "error":
-                                st.error(response_data["data"])
-                                break
+                        # 🚨 중요: 서버 워크플로우 재개 대기
+                        st.write("⏳ 서버에서 워크플로우를 재개하고 있습니다...")
+                        time.sleep(2)  # 2초 초기 대기
 
+                        # 응답 대기 설정
+                        max_wait_time = 120  # 2분 대기
+                        start_time = time.time()
+                        consecutive_none_count = 0
+                        max_consecutive_none = 10  # 연속 None 10회까지 허용
+                        response_started = False
+
+                        st.write("🔄 AI 응답 대기 중...")
+
+                        while time.time() - start_time < max_wait_time:
+                            try:
+                                response_data = st.session_state.current_ws_client.receive_response()
+
+                                if response_data is None:
+                                    consecutive_none_count += 1
+
+                                    # 응답이 시작되기 전에는 더 관대하게 대기
+                                    if not response_started and consecutive_none_count < max_consecutive_none:
+                                        elapsed = time.time() - start_time
+                                        response_placeholder.markdown(f"🔄 서버 응답 대기 중... ({elapsed:.1f}초)")
+                                        time.sleep(0.5)  # 0.5초 대기 후 재시도
+                                        continue
+                                    # 응답이 시작된 후에는 빠르게 종료
+                                    elif response_started and consecutive_none_count >= 3:
+                                        st.write("ℹ️ 응답 완료로 판단됨")
+                                        break
+                                    # 너무 오래 대기했으면 종료
+                                    elif consecutive_none_count >= max_consecutive_none:
+                                        st.warning("⚠️ 서버 응답 대기 시간 초과")
+                                        break
+                                    else:
+                                        time.sleep(0.2)
+                                        continue
+
+                                # 응답 데이터 처리
+                                consecutive_none_count = 0  # None 카운트 리셋
+
+                                if response_data["type"] == "response_chunk":
+                                    chunk = response_data["data"]
+                                    full_response += chunk
+                                    response_placeholder.markdown(full_response + "▌")
+                                    response_started = True
+                                    st.write(f"📥 응답 수신 중... ({len(full_response)}자)")
+                                    time.sleep(0.01)
+
+                                elif response_data["type"] == "response_complete":
+                                    st.write("✅ 응답 완료 신호 수신")
+                                    break
+
+                                elif response_data["type"] == "error":
+                                    st.error(f"서버 오류: {response_data['data']}")
+                                    break
+
+                                elif response_data["type"] in ["approval_received", "approval_processed"]:
+                                    st.info(f"📋 승인 상태: {response_data['data']}")
+                                    # 승인 처리 메시지는 무시하고 계속 대기
+                                    continue
+
+                                elif response_data["type"] == "heartbeat":
+                                    st.write("💓 서버 연결 확인")
+                                    continue
+
+                                else:
+                                    st.write(f"🔍 기타 응답: {response_data['type']}")
+                                    continue
+
+                            except Exception as e:
+                                st.error(f"응답 수신 중 오류: {e}")
+                                time.sleep(0.5)
+                                continue
+
+                        # 최종 응답 처리
                         if full_response:
                             response_placeholder.markdown(full_response)
                             st.session_state.messages.append({
                                 "role": "assistant",
                                 "content": full_response
                             })
+                            st.success(f"✅ 최종 답변 수신 완료 ({len(full_response)}자)")
+                        else:
+                            response_placeholder.markdown("⚠️ 서버로부터 응답을 받지 못했습니다.")
+                            st.warning("서버 처리가 지연되고 있을 수 있습니다.")
 
-                        # 클라이언트 정리
+                        # 🚀 모든 처리 완료 후에만 연결 종료
+                        st.write("🔌 WebSocket 연결 종료")
                         st.session_state.current_ws_client.close()
                         st.session_state.current_ws_client = None
 
