@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from typing import List, Optional
 from models import MessageCreate, MessageUpdate, MessageResponse, MessageStats, DeleteResponse
-from services.message_service import MessageService
+from services.message import MessageService
 import logging
 import time
 from datetime import datetime

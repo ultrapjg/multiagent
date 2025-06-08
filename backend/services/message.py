@@ -1,4 +1,4 @@
-# backend/services/message_service.py
+# backend/services/message.py
 from typing import List, Optional, Dict, Any
 from psycopg2.extras import RealDictCursor
 from database import get_db_connection

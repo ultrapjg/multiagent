@@ -8,8 +8,8 @@ import json
 import asyncio
 import logging
 
-from services.supervisor_service import SupervisorService
-from services.message_service import MessageService
+from services.supervisor import SupervisorService
+from services.message import MessageService
 from database import init_db
 from core.agent_service import MCPAgentService
 from core.tool_service import MCPToolService

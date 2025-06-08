@@ -574,7 +574,7 @@ def main():
                 full_response = ""
 
                 # 웹소켓 클라이언트 생성 및 연결
-                client = HITLWebSocketClient("ws://localhost:8000/user/chat")
+                client = HITLWebSocketClient("ws://localhost:8000/api/user/chat")
 
                 if client.connect():
                     # HITL 설정을 포함하여 메시지 전송

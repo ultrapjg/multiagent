@@ -8,8 +8,8 @@ import json
 import asyncio
 import logging
 
-from services.supervisor_service import SupervisorService
-from services.message_service import MessageService
+from services.supervisor import SupervisorService
+from services.message import MessageService
 from database import init_db
 from core.agent_service import MCPAgentService
 from core.tool_service import MCPToolService
@@ -134,7 +134,7 @@ async def shutdown_event():
         await supervisor.cleanup_mcp_client()
 
 
-@app.websocket("/user/chat")
+@app.websocket("/api/user/chat")
 async def websocket_endpoint_user(websocket: WebSocket):
     await websocket.accept()
     thread_id = "default"
@@ -204,6 +204,9 @@ async def websocket_endpoint_user(websocket: WebSocket):
                 elif message and not message.startswith("["):
                     print(f"💬 일반 메시지: {message}")
 
+                    # 메시지 저장
+                    MessageService.create_message(message, "admin")
+
                     # 기존 채팅이 있으면 취소
                     if chat_task and not chat_task.done():
                         chat_task.cancel()
@@ -253,6 +256,7 @@ async def process_chat_message(websocket, supervisor, message, thread_id):
         print(f"❌ 채팅 처리 오류: {e}")
 
 
+# 추후 삭제
 @app.post("/api/user/hitl/approve")
 async def handle_hitl_approval(request: Dict, user=Depends(get_current_user)):
     """REST API를 통한 HITL 승인 처리"""
