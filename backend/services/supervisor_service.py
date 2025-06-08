@@ -353,6 +353,62 @@ JSON 형식으로 응답하세요:
         """실행 계획 수립"""
         self.logger.info("실행 계획 수립 중...")
 
+        # 고위험 키워드 체크 및 HITL 설정을 여기서 먼저 수행
+        if self.hitl_config.get("enabled", False) and self.hitl_config.get("require_approval_for_tools", False):
+            query_lower = state["user_query"].lower()
+            high_impact_keywords = self.hitl_config.get("high_impact_tools", [])
+
+            detected_keywords = []
+            for keyword in high_impact_keywords:
+                if keyword.lower() in query_lower:
+                    detected_keywords.append(keyword)
+
+            if detected_keywords:
+                self.logger.info(f"계획 단계에서 고위험 키워드 감지: {detected_keywords}")
+
+                # 사용 가능한 도구 확인
+                available_tools = []
+                if self.tools:
+                    for tool in self.tools:
+                        tool_name = getattr(tool, 'name', str(tool))
+                        available_tools.append(tool_name)
+
+                # 대표 도구 선택
+                if available_tools:
+                    representative_tool = available_tools[0]
+                    tool_description = f"'{representative_tool}' 도구를 통한 고위험 작업"
+                else:
+                    representative_tool = "system_operation"
+                    tool_description = "시스템 작업"
+
+                # 승인 메시지 생성
+                approval_message = f"""🔴 고위험 작업 승인 요청
+
+감지된 키워드: {', '.join(detected_keywords)}
+실행 예정 도구: {representative_tool}
+작업 내용: {tool_description}
+요청 내용: {state['user_query']}
+위험도: 높음
+
+⚠️ 이 작업은 시스템에 영향을 줄 수 있습니다.
+정말로 진행하시겠습니까? (approved/rejected/modified)"""
+
+                # pending_decision 생성하여 상태에 저장
+                state["pending_decision"] = {
+                    "type": HumanApprovalType.TOOL_EXECUTION.value,
+                    "tool_name": representative_tool if available_tools else "고위험_시스템_작업",
+                    "tool_args": {"query": state["user_query"]},
+                    "reason": f"고위험 키워드 감지: {', '.join(detected_keywords)}",
+                    "keywords": detected_keywords,
+                    "available_tools": available_tools,
+                    "risk_level": "high"
+                }
+                state["approval_type"] = HumanApprovalType.TOOL_EXECUTION.value
+                state["approval_message"] = approval_message
+                state["human_approval_needed"] = True
+
+                self.logger.info("HITL 정보가 상태에 저장됨")
+
         # 첫 번째 반복이면 무조건 도구 실행 계획을 세워야 함
         if state["iteration_count"] == 0:
             self.logger.info("첫 번째 반복 - 도구 실행 계획 수립")

@@ -218,6 +218,39 @@ async def get_admin_stats(admin=Depends(get_admin_user)):
 async def health_check():
     return {"status": "healthy", "service": "LangGraph MCP Agents"}
 
+supervisor_instances: Dict[str, SupervisorService] = {}
+active_websockets: Dict[str, WebSocket] = {}
+pending_approvals: Dict[str, asyncio.Event] = {}
+
+# HITL 콜백 함수 생성
+def create_hitl_callback(thread_id: str):
+    """각 스레드별 HITL 콜백 생성"""
+
+    async def hitl_callback(message: str, context: Dict) -> str:
+        """WebSocket을 통해 프론트엔드로 승인 요청을 보내는 콜백"""
+
+        # WebSocket 연결 확인
+        ws = active_websockets.get(thread_id)
+        if not ws:
+            print(f"WebSocket 연결 없음: {thread_id}")
+            return "rejected"  # 안전을 위해 거부
+
+        try:
+            # 프론트엔드로 HITL 요청 전송
+            await ws.send_json({
+                "type": "response_chunk",
+                "data": message  # 승인 메시지 전체를 전송
+            })
+
+            # 특별한 플래그 반환하여 비동기 대기 시작
+            return "__WAIT_FOR_ASYNC_INPUT__"
+
+        except Exception as e:
+            print(f"HITL 메시지 전송 실패: {e}")
+            return "rejected"
+
+    return hitl_callback
+
 
 @app.websocket("/user/chat")
 async def websocket_chat(websocket: WebSocket):

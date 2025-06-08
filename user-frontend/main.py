@@ -66,7 +66,7 @@ class HITLWebSocketClient:
                 "type": "hitl_approval"
             }
             self.ws.send(json.dumps(data))
-            self.logger.info(f"승인 응답 전송: {approval_response}")
+            st.info(f"승인 응답 전송: {approval_response}")
             return True
         except Exception as e:
             st.error(f"승인 응답 전송 실패: {e}")
@@ -401,23 +401,24 @@ def main():
         )
 
         if approval_response:
-            # 승인 응답을 백엔드로 전송
-            if send_hitl_approval_to_backend(approval_response, st.session_state.thread_id):
-                # 승인 응답 메시지 추가
-                st.session_state.messages.append({
-                    "role": "user",
-                    "content": f"[Human Approval] {approval_response}",
-                    "type": "approval"
-                })
+            # WebSocket을 통해 승인 응답 전송
+            if st.session_state.current_ws_client:
+                if st.session_state.current_ws_client.send_approval_response(approval_response,
+                                                                             st.session_state.thread_id):
+                    # 승인 응답 메시지 추가
+                    st.session_state.messages.append({
+                        "role": "user",
+                        "content": f"[Human Approval] {approval_response}",
+                        "type": "approval"
+                    })
 
-                # 상태 초기화
-                st.session_state.waiting_for_approval = False
-                st.session_state.current_hitl_data = None
+                    # 상태 초기화
+                    st.session_state.waiting_for_approval = False
+                    st.session_state.current_hitl_data = None
 
-                st.success(f"✅ 승인 응답 완료: {approval_response}")
+                    st.success(f"✅ 승인 응답 완료: {approval_response}")
 
-                # WebSocket 클라이언트가 있으면 계속 응답 받기
-                if st.session_state.current_ws_client:
+                    # WebSocket 클라이언트가 있으면 계속 응답 받기
                     with st.chat_message("assistant"):
                         response_placeholder = st.empty()
                         full_response = ""
@@ -450,10 +451,21 @@ def main():
                         st.session_state.current_ws_client.close()
                         st.session_state.current_ws_client = None
 
-                time.sleep(0.5)
-                st.rerun()
+                    time.sleep(0.5)
+                    st.rerun()
+                else:
+                    st.error("❌ 승인 응답 전송 실패")
             else:
-                st.error("❌ 승인 응답 전송 실패")
+                # REST API로 전송 (폴백)
+                if send_hitl_approval_to_backend(approval_response, st.session_state.thread_id):
+                    st.success(f"✅ 승인 응답 완료: {approval_response}")
+                    # 상태 초기화
+                    st.session_state.waiting_for_approval = False
+                    st.session_state.current_hitl_data = None
+                    time.sleep(0.5)
+                    st.rerun()
+                else:
+                    st.error("❌ 승인 응답 전송 실패")
 
     # 사용자 입력 (승인 대기 중이 아닐 때만)
     if not st.session_state.waiting_for_approval:
