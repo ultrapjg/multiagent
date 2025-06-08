@@ -59,15 +59,27 @@ class HITLWebSocketClient:
             return False
 
         try:
-            # HITL 승인 응답임을 나타내는 특별한 형식으로 전송
             data = {
                 "message": f"[HITL_APPROVAL]{approval_response}",
-                "thread_id": thread_id,
-                "type": "hitl_approval"
+                "thread_id": thread_id
             }
+
             self.ws.send(json.dumps(data))
             st.info(f"승인 응답 전송: {approval_response}")
-            return True
+
+            # 🚨 서버 응답 확인 (수정된 부분)
+            try:
+                self.ws.settimeout(5.0)  # 5초 대기
+                response = self.ws.recv()
+                response_data = json.loads(response)
+
+                st.success(f"✅ 서버 응답: {response_data.get('data', '성공')}")
+                return True
+
+            except Exception as recv_e:
+                st.warning(f"⚠️ 서버 응답 대기 시간 초과: {recv_e}")
+                return True  # 메시지는 전송되었으므로 True
+
         except Exception as e:
             st.error(f"승인 응답 전송 실패: {e}")
             return False
@@ -401,8 +413,22 @@ def main():
         )
 
         if approval_response:
+            st.write(f"🎯 승인 응답: {approval_response}")
+            st.write(f"🔗 WebSocket 클라이언트 존재: {st.session_state.current_ws_client is not None}")
+
             # WebSocket을 통해 승인 응답 전송
             if st.session_state.current_ws_client:
+                st.write(f"🔗 연결 상태: {st.session_state.current_ws_client.is_connected}")
+
+                # **중요**: 연결 상태 재확인
+                try:
+                    # ping/pong 테스트
+                    st.session_state.current_ws_client.ws.ping()
+                    st.write("✅ WebSocket ping 성공")
+                except Exception as ping_e:
+                    st.error(f"❌ WebSocket ping 실패: {ping_e}")
+                    st.session_state.current_ws_client.is_connected = False
+
                 if st.session_state.current_ws_client.send_approval_response(approval_response,
                                                                              st.session_state.thread_id):
                     # 승인 응답 메시지 추가

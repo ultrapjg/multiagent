@@ -112,6 +112,24 @@ class SupervisorService:
         self.human_input_callback = callback
         self.logger.info(f"Human input callback 설정 완료: {callback}")
 
+    async def set_human_input_async(self, human_input: str) -> bool:
+        """비동기 human input 설정"""
+        try:
+            self.logger.info(f"Human input 설정: {human_input}")
+
+            if hasattr(self, 'human_input_queue'):
+                await self.human_input_queue.put(human_input)
+                self.waiting_for_human_input = False
+                self.logger.info("Human input 큐에 추가 완료")
+                return True
+            else:
+                self.logger.warning("human_input_queue가 없음")
+                return False
+
+        except Exception as e:
+            self.logger.error(f"Human input 설정 실패: {e}")
+            return False
+
     def get_pending_approval_info(self) -> Dict[str, Any]:
         """현재 대기 중인 승인 정보 반환"""
         if self.waiting_for_human_input:

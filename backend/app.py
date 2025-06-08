@@ -134,136 +134,110 @@ async def shutdown_event():
         await supervisor.cleanup_mcp_client()
 
 
-@app.websocket("/api/user/chat")
+@app.websocket("/user/chat")
 async def websocket_endpoint_user(websocket: WebSocket):
-    """사용자용 WebSocket 엔드포인트 - HITL 지원"""
     await websocket.accept()
-    thread_id = "default"  # 실제로는 세션별로 관리해야 함
+    thread_id = "default"
 
     try:
-        # WebSocket 연결 저장
         active_websockets[thread_id] = websocket
 
-        # HITL 메시지 큐 초기화
-        if thread_id not in pending_hitl_messages:
-            pending_hitl_messages[thread_id] = asyncio.Queue()
-
-        # Supervisor 인스턴스 생성 또는 가져오기
+        # Supervisor 초기화
         if thread_id not in supervisor_instances:
             supervisor = SupervisorService()
-
-            # HITL 콜백 설정 - 중요!
             supervisor.set_human_input_callback(create_hitl_callback(thread_id))
-
-            # 에이전트 초기화
             await supervisor.initialize_agent(
                 model_name="qwen2.5:32b",
                 hitl_enabled=True
             )
-
             supervisor_instances[thread_id] = supervisor
-            print(f"✅ Supervisor 인스턴스 생성 완료: {thread_id}")
         else:
             supervisor = supervisor_instances[thread_id]
 
-        # HITL 메시지 처리를 위한 태스크
-        async def process_hitl_messages():
-            while True:
-                try:
-                    # HITL 메시지 큐에서 메시지 가져오기
-                    hitl_data = await pending_hitl_messages[thread_id].get()
+        # 🚨 핵심: 메시지 처리를 논블로킹으로 변경
+        chat_task = None
 
-                    # WebSocket으로 전송
-                    await websocket.send_json({
-                        "type": "response_chunk",
-                        "data": hitl_data["message"]
-                    })
-                    print(f"HITL 메시지 전송 완료")
+        while True:
+            try:
+                # 타임아웃을 짧게 설정하여 블로킹 방지
+                data = await asyncio.wait_for(
+                    websocket.receive_json(),
+                    timeout=0.1  # 100ms 타임아웃
+                )
 
-                except Exception as e:
-                    print(f"HITL 메시지 처리 오류: {e}")
-                    break
-
-        # HITL 메시지 처리 태스크 시작
-        hitl_task = asyncio.create_task(process_hitl_messages())
-
-        try:
-            while True:
-                # 메시지 수신
-                data = await websocket.receive_json()
+                print(f"📥 메시지 수신: {data}")
                 message = data.get("message", "")
 
-                # HITL 승인 응답 처리
+                # HITL 승인 응답 처리 (최우선)
                 if message.startswith("[HITL_APPROVAL]"):
                     approval = message.replace("[HITL_APPROVAL]", "").strip()
-                    print(f"HITL 승인 응답 수신: {approval}")
+                    print(f"🎯 HITL 승인 수신: {approval}")
 
-                    # Supervisor에 승인 응답 전달
-                    success = await supervisor.set_human_input_async(approval)
+                    # 즉시 응답
+                    await websocket.send_json({
+                        "type": "approval_received",
+                        "data": f"승인 '{approval}' 처리 중"
+                    })
 
-                    if success:
-                        print("✅ 승인 응답 처리 성공")
-                        # 워크플로우가 계속 진행되도록 대기
-                        continue
-                    else:
-                        print("❌ 승인 응답 처리 실패")
-                        await websocket.send_json({
-                            "type": "error",
-                            "data": "승인 처리 실패"
-                        })
-                else:
-                    # 일반 메시지 처리
-                    try:
-                        print(f"사용자 메시지 수신: {message}")
+                    # Supervisor에 승인 전달
+                    if hasattr(supervisor, 'human_input_queue'):
+                        try:
+                            await supervisor.human_input_queue.put(approval)
+                            supervisor.waiting_for_human_input = False
+                            print(f"✅ 승인 처리 완료: {approval}")
 
-                        # 메시지 저장
-                        result = MessageService.create_message(message, "user")
+                            await websocket.send_json({
+                                "type": "approval_processed",
+                                "data": "워크플로우 재개됨"
+                            })
+                        except Exception as e:
+                            print(f"❌ 승인 처리 실패: {e}")
 
-                        # 스트리밍 응답 처리
-                        response_started = False
-                        async for chunk in supervisor.chat_stream(message, thread_id):
-                            if not response_started:
-                                print("응답 스트리밍 시작")
-                                response_started = True
+                # 일반 메시지 처리
+                elif message and not message.startswith("["):
+                    print(f"💬 일반 메시지: {message}")
 
-                            # HITL 메시지는 큐를 통해 처리되므로 여기서는 건너뜀
-                            if not chunk.startswith("\n🤚") and not chunk.startswith("\n💭"):
-                                await websocket.send_json({
-                                    "type": "response_chunk",
-                                    "data": chunk
-                                })
+                    # 기존 채팅이 있으면 취소
+                    if chat_task and not chat_task.done():
+                        chat_task.cancel()
 
-                        # 응답 완료
-                        await websocket.send_json({
-                            "type": "response_complete"
-                        })
-                        print("응답 완료")
+                    # 새 채팅 시작 (백그라운드)
+                    chat_task = asyncio.create_task(
+                        process_chat_message(websocket, supervisor, message, thread_id)
+                    )
 
-                    except Exception as e:
-                        print(f"메시지 처리 오류: {e}")
-                        await websocket.send_json({
-                            "type": "error",
-                            "data": str(e)
-                        })
+            except asyncio.TimeoutError:
+                # 타임아웃은 정상 - 계속 진행
+                continue
 
-        finally:
-            # 태스크 정리
-            hitl_task.cancel()
+            except Exception as e:
+                print(f"❌ 메시지 처리 오류: {e}")
+                break
 
     except WebSocketDisconnect:
-        print(f"WebSocket 연결 종료: {thread_id}")
-        # 연결 종료 시 정리
-        if thread_id in active_websockets:
-            del active_websockets[thread_id]
-        if thread_id in pending_hitl_messages:
-            del pending_hitl_messages[thread_id]
-
+        print("WebSocket 연결 종료")
     except Exception as e:
         print(f"WebSocket 오류: {e}")
-        await websocket.send_json({
-            "type": "error",
-            "data": str(e)
-        })
+
+
+async def process_chat_message(websocket, supervisor, message, thread_id):
+    """채팅 메시지 처리 (백그라운드 태스크)"""
+    try:
+        print(f"🚀 채팅 처리 시작: {message}")
+
+        async for chunk in supervisor.chat_stream(message, thread_id):
+            if not chunk.startswith("\n🤚") and not chunk.startswith("\n💭"):
+                await websocket.send_json({
+                    "type": "response_chunk",
+                    "data": chunk
+                })
+                await asyncio.sleep(0.01)
+
+        await websocket.send_json({"type": "response_complete"})
+        print("✅ 채팅 처리 완료")
+
+    except Exception as e:
+        print(f"❌ 채팅 처리 오류: {e}")
 
 
 @app.post("/api/user/hitl/approve")
