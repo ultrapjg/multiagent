@@ -391,19 +391,22 @@ JSON 형식으로 응답하세요:
                         tool_name = getattr(tool, 'name', str(tool))
                         available_tools.append(tool_name)
 
-                # 대표 도구 선택
-                if available_tools:
-                    representative_tool = available_tools[0]
-                    tool_description = f"'{representative_tool}' 도구를 통한 고위험 작업"
+                relevant_tool_name = self._find_relevant_tool_by_keywords(detected_keywords)
+
+                if relevant_tool_name:
+                    tool_description = f"'{relevant_tool_name}' 도구를 통한 고위험 작업"
+                    self.logger.info(f"키워드 '{detected_keywords}'에 적합한 도구 선택: {relevant_tool_name}")
                 else:
-                    representative_tool = "system_operation"
-                    tool_description = "시스템 작업"
+                    # 적합한 도구가 없으면 일반 시스템 작업으로 분류
+                    relevant_tool_name = "system_operation"
+                    tool_description = f"'{', '.join(detected_keywords)}' 키워드가 포함된 시스템 작업"
+                    self.logger.info("적합한 도구를 찾지 못해 일반 시스템 작업으로 분류")
 
                 # 승인 메시지 생성
                 approval_message = f"""🔴 고위험 작업 승인 요청
 
 감지된 키워드: {', '.join(detected_keywords)}
-실행 예정 도구: {representative_tool}
+실행 예정 도구: {relevant_tool_name}
 작업 내용: {tool_description}
 요청 내용: {state['user_query']}
 위험도: 높음
@@ -414,7 +417,7 @@ JSON 형식으로 응답하세요:
                 # pending_decision 생성하여 상태에 저장
                 state["pending_decision"] = {
                     "type": HumanApprovalType.TOOL_EXECUTION.value,
-                    "tool_name": representative_tool if available_tools else "고위험_시스템_작업",
+                    "tool_name": relevant_tool_name if available_tools else "고위험_시스템_작업",
                     "tool_args": {"query": state["user_query"]},
                     "reason": f"고위험 키워드 감지: {', '.join(detected_keywords)}",
                     "keywords": detected_keywords,
@@ -521,6 +524,45 @@ JSON 형식으로 응답하세요:
             state["current_step"] = "plan_failed"
 
         return state
+
+    def _find_relevant_tool_by_keywords(self, detected_keywords: List[str]) -> Optional[str]:
+        """감지된 키워드에 맞는 도구 찾기"""
+        if not self.tools:
+            return None
+
+        available_tool_names = [getattr(tool, 'name', str(tool)) for tool in self.tools]
+
+        # 키워드별 도구 매칭 규칙
+        keyword_mappings = {
+            '삭제': ['delete', 'remove', 'del'],
+            'delete': ['delete', 'remove', 'del'],
+            '제거': ['delete', 'remove', 'del'],
+            'remove': ['delete', 'remove', 'del'],
+            '수정': ['edit', 'modify', 'update'],
+            'modify': ['edit', 'modify', 'update'],
+            '변경': ['edit', 'modify', 'change'],
+            'change': ['edit', 'modify', 'change'],
+            '시간': ['time', 'clock', 'current'],
+            'time': ['time', 'clock', 'current'],
+            '시스템': ['system', 'admin'],
+            'system': ['system', 'admin']
+        }
+
+        # 감지된 키워드로 관련 도구 찾기
+        for keyword in detected_keywords:
+            if keyword in keyword_mappings:
+                related_terms = keyword_mappings[keyword]
+
+                # 사용 가능한 도구 중에서 관련 용어가 포함된 도구 찾기
+                for tool_name in available_tool_names:
+                    tool_name_lower = tool_name.lower()
+                    if any(term in tool_name_lower for term in related_terms):
+                        self.logger.info(f"키워드 '{keyword}'에 매칭되는 도구 발견: {tool_name}")
+                        return tool_name
+
+        # 매칭되는 도구가 없음
+        self.logger.warning(f"키워드 {detected_keywords}에 매칭되는 도구를 찾지 못함")
+        return None
 
     async def _human_approval(self, state: WorkflowState) -> WorkflowState:
         """Human approval 요청 처리 - 강화된 디버깅 및 상태 보존"""
@@ -751,8 +793,14 @@ JSON 형식으로 응답하세요:
                 state["current_step"] = "tools_skipped"
                 return state
 
-            # 첫 번째 사용 가능한 도구 실행
-            selected_tool = available_tools[0]
+            # 🚀 개선된 도구 선택 로직
+            selected_tool = await self._select_best_tool(state["user_query"], available_tools)
+
+            if not selected_tool:
+                self.logger.info("사용자 요청에 적합한 도구가 없음")
+                state["current_step"] = "tools_skipped"
+                return state
+
             tool_name = getattr(selected_tool, 'name', 'mcp_tool')
 
             self.logger.info(f"새로운 도구 '{tool_name}' 실행 중...")
@@ -806,6 +854,61 @@ JSON 형식으로 응답하세요:
             state["current_step"] = "tools_executed"
 
         return state
+
+    async def _select_best_tool(self, user_query: str, available_tools: List) -> Optional[Any]:
+        """사용자 요청에 가장 적합한 도구 선택"""
+        if not available_tools:
+            return None
+
+        if len(available_tools) == 1:
+            return available_tools[0]
+
+        # 도구명과 설명 수집
+        tool_descriptions = []
+        for tool in available_tools:
+            tool_name = getattr(tool, 'name', str(tool))
+            tool_descriptions.append(f"- {tool_name}")
+
+        # LLM 기반 도구 선택
+        selection_prompt = ChatPromptTemplate.from_messages([
+            ("system", """사용자 요청에 가장 적합한 도구를 선택하세요.
+
+    사용 가능한 도구들:
+    {tools}
+
+    **선택 기준:**
+    - 파일 삭제 요청 → delete_file 선택
+    - 시간 조회 요청 → get_current_time 선택
+    - 관련 없는 도구는 절대 선택하지 마세요
+
+    정확한 도구명만 반환하세요."""),
+            ("human", "사용자 요청: {query}")
+        ])
+
+        try:
+            response = await self.model.ainvoke(
+                selection_prompt.format_messages(
+                    query=user_query,
+                    tools="\n".join(tool_descriptions)
+                )
+            )
+
+            selected_tool_name = response.content.strip()
+            self.logger.info(f"LLM이 선택한 도구: '{selected_tool_name}'")
+
+            # 선택된 도구 찾기
+            for tool in available_tools:
+                if getattr(tool, 'name', str(tool)) == selected_tool_name:
+                    self.logger.info(f"✅ 적절한 도구 선택됨: {selected_tool_name}")
+                    return tool
+
+            # 매칭 실패 시 첫 번째 도구 (폴백)
+            self.logger.warning(f"도구 매칭 실패. 첫 번째 도구 사용: {getattr(available_tools[0], 'name', 'unknown')}")
+            return available_tools[0]
+
+        except Exception as e:
+            self.logger.error(f"도구 선택 실패: {e}")
+            return available_tools[0]
 
     async def _evaluate_results(self, state: WorkflowState) -> WorkflowState:
         """도구 결과 평가"""
