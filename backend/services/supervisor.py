@@ -1,24 +1,23 @@
 import asyncio
 import json
-import os
-from typing import Dict, List, Any, AsyncGenerator, Optional, Literal, TypedDict, Callable
-from langchain_anthropic import ChatAnthropic
-from langchain_openai import ChatOpenAI
-from langchain_ollama import ChatOllama
-from langchain_mcp_adapters.client import MultiServerMCPClient, load_mcp_tools
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from langchain_core.prompts import ChatPromptTemplate
-from langgraph.graph import StateGraph, END, START
-from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.prebuilt import ToolNode
-import yaml
 import logging
-from datetime import datetime
 from enum import Enum
+from typing import Dict, List, Any, AsyncGenerator, Optional, Literal, TypedDict, Callable
+
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_ollama import ChatOllama
+from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import StateGraph, END, START
+
+from .agent_executor import AgentExecutorService
+from .result_aggregator import ResultAggregatorService
 
 
 class WorkflowState(TypedDict):
-    """워크플로우 상태 정의 - pending_decision을 별도로 관리"""
     messages: List[Any]
     user_query: str
     current_step: str
@@ -34,7 +33,7 @@ class WorkflowState(TypedDict):
     human_approval_needed: bool
     human_input_requested: bool
     human_response: Optional[str]
-    pending_decision: Optional[Dict[str, Any]]  # TypedDict에서도 명시적으로 정의
+    pending_decision: Optional[Dict[str, Any]]
     hitl_enabled: bool
     # 추가 HITL 상태 관리
     approval_type: Optional[str]
@@ -91,6 +90,9 @@ class SupervisorService:
         # 로깅 설정
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
+
+        self.agent_executor = None
+        self.result_aggregator = None
 
     def _default_human_input_callback(self, message: str, context: Dict) -> str:
         """기본 human input callback - 비동기 대기를 위한 플래그 설정"""
@@ -161,14 +163,14 @@ class SupervisorService:
                 self.set_human_input_callback(human_input_callback)
                 self.logger.info("초기화 시 human input callback 설정됨")
 
-            # HITL 설정 (더 정확한 키워드로 수정)
+            # HITL 설정
             self.hitl_config["enabled"] = hitl_enabled
             if hitl_enabled:
                 self.hitl_config.update({
                     "require_approval_for_tools": True,  # 도구 승인 활성화
                     "require_approval_for_low_confidence": True,  # 낮은 신뢰도 승인 활성화
                     "confidence_threshold": 0.8,  # 임계값을 높여서 더 자주 트리거
-                    # 더 구체적이고 명확한 고위험 키워드
+                    # 고위험 키워드
                     "high_impact_tools": [
                         "삭제", "제거", "지우", "delete", "remove", "rm",
                         "파괴", "destroy", "kill", "terminate",
@@ -195,6 +197,10 @@ class SupervisorService:
             self.model = self.create_model(model_name)
             self.evaluator_model = self.create_model(evaluator_model_name or model_name)
 
+            # 분리된 서비스 초기화
+            self.agent_executor = AgentExecutorService(self.model, self.tools)
+            self.result_aggregator = ResultAggregatorService(self.model, self.evaluator_model, self.tools)
+
             # 동적 워크플로우 생성
             self.workflow = self._create_dynamic_workflow()
 
@@ -215,9 +221,9 @@ class SupervisorService:
         workflow.add_node("analyze_query", self._analyze_query)
         workflow.add_node("plan_execution", self._plan_execution)
         workflow.add_node("human_approval", self._human_approval)  # Human approval 노드
-        workflow.add_node("execute_tools", self._execute_tools)
-        workflow.add_node("evaluate_results", self._evaluate_results)
-        workflow.add_node("synthesize_answer", self._synthesize_answer)
+        workflow.add_node("execute_tools", self._execute_tools_wrapper)
+        workflow.add_node("evaluate_results", self._evaluate_results_wrapper)
+        workflow.add_node("synthesize_answer", self._synthesize_answer_wrapper)
         workflow.add_node("quality_check", self._quality_check)
         workflow.add_node("simple_answer", self._simple_answer)
         workflow.add_node("human_input", self._human_input)  # Human input 노드
@@ -718,9 +724,6 @@ JSON 형식으로 응답하세요:
 
         # 상태 초기화
         state["human_approval_needed"] = False
-        # pending_decision은 디버깅을 위해 보존 (필요시)
-        # state["pending_decision"] = None  # 주석 처리
-        # state["approval_message"] = None  # 주석 처리
 
         self.logger.info(f"=== Human approval 완료: {state.get('human_response')} ===")
         return state
@@ -753,318 +756,32 @@ JSON 형식으로 응답하세요:
         state["human_input_requested"] = False
         return state
 
-    async def _execute_tools(self, state: WorkflowState) -> WorkflowState:
-        """실제 MCP 도구 실행"""
-        self.logger.info("MCP 도구 실행 단계...")
-
-        # 계획이 생략되었거나 추가 도구가 불필요한 경우 건너뛰기
-        if state["current_step"] in ["plan_skipped", "plan_failed"]:
-            self.logger.info("계획 단계에서 도구 실행이 불필요하다고 판단됨 - 도구 실행 생략")
+    async def _execute_tools_wrapper(self, state: WorkflowState) -> WorkflowState:
+        """도구 실행 래퍼 함수"""
+        if self.agent_executor:
+            return await self.agent_executor.execute_tools(state)
+        else:
+            self.logger.error("AgentExecutorService가 초기화되지 않음")
             state["current_step"] = "tools_skipped"
             return state
 
-        # 이미 충분한 결과가 있는지 재확인
-        if state["evaluation_results"]:
-            latest_evaluation = state["evaluation_results"][-1]
-            confidence = latest_evaluation.get("confidence", 0.0)
-            if confidence >= 1.0:
-                self.logger.info(f"완벽한 신뢰도({confidence:.2f}) 달성 - 도구 실행 생략")
-                state["current_step"] = "tools_skipped"
-                return state
-
-        try:
-            if not self.tools:
-                self.logger.info("사용 가능한 도구가 없음. 모델 지식만으로 답변 생성")
-                state["current_step"] = "tools_executed"
-                return state
-
-            # 이미 성공적으로 실행된 도구들 확인
-            executed_tools = set()
-            for tool_result in state["tool_results"]:
-                if tool_result.get("success", False):
-                    executed_tools.add(tool_result.get("tool_name", ""))
-
-            # 아직 실행되지 않은 도구가 있는지 확인
-            available_tools = [tool for tool in self.tools
-                               if getattr(tool, 'name', str(tool)) not in executed_tools]
-
-            if not available_tools:
-                self.logger.info("모든 관련 도구가 이미 실행됨 - 추가 실행 생략")
-                state["current_step"] = "tools_skipped"
-                return state
-
-            # 🚀 개선된 도구 선택 로직
-            selected_tool = await self._select_best_tool(state["user_query"], available_tools)
-
-            if not selected_tool:
-                self.logger.info("사용자 요청에 적합한 도구가 없음")
-                state["current_step"] = "tools_skipped"
-                return state
-
-            tool_name = getattr(selected_tool, 'name', 'mcp_tool')
-
-            self.logger.info(f"새로운 도구 '{tool_name}' 실행 중...")
-
-            # 실행 계획에서 추출한 도구 정보를 바탕으로 실제 도구 실행
-            tool_node = ToolNode([selected_tool])
-
-            # 도구 실행을 위한 메시지 구성
-            tool_message = AIMessage(
-                content="",
-                tool_calls=[{
-                    "name": tool_name,
-                    "args": {"query": state["user_query"]},
-                    "id": f"call_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                }]
-            )
-
-            # 실제 도구 실행
-            tool_response = await tool_node.ainvoke({"messages": [tool_message]})
-
-            if tool_response and "messages" in tool_response:
-                for msg in tool_response["messages"]:
-                    if hasattr(msg, 'content'):
-                        tool_result = {
-                            "tool_name": tool_name,
-                            "input": state["user_query"],
-                            "output": msg.content,
-                            "timestamp": datetime.now().isoformat(),
-                            "success": True
-                        }
-
-                        state["tool_results"].append(tool_result)
-                        state["reasoning_trace"].append(f"새로운 MCP 도구 실행 완료: {tool_result['tool_name']}")
-                        self.logger.info(f"도구 '{tool_result['tool_name']}' 실행 성공")
-            else:
-                self.logger.warning("도구 실행 결과가 비어있음")
-
-            state["current_step"] = "tools_executed"
-
-        except Exception as e:
-            self.logger.error(f"MCP 도구 실행 실패: {e}")
-            # 도구 실행 실패 시에도 모델 지식으로 답변 시도
-            tool_result = {
-                "tool_name": "fallback_knowledge",
-                "input": state["user_query"],
-                "output": f"도구 실행 실패로 모델 지식 기반 답변 시도: {str(e)}",
-                "timestamp": datetime.now().isoformat(),
-                "success": False
-            }
-            state["tool_results"].append(tool_result)
-            state["current_step"] = "tools_executed"
-
-        return state
-
-    async def _select_best_tool(self, user_query: str, available_tools: List) -> Optional[Any]:
-        """사용자 요청에 가장 적합한 도구 선택"""
-        if not available_tools:
-            return None
-
-        if len(available_tools) == 1:
-            return available_tools[0]
-
-        # 도구명과 설명 수집
-        tool_descriptions = []
-        for tool in available_tools:
-            tool_name = getattr(tool, 'name', str(tool))
-            tool_descriptions.append(f"- {tool_name}")
-
-        # LLM 기반 도구 선택
-        selection_prompt = ChatPromptTemplate.from_messages([
-            ("system", """사용자 요청에 가장 적합한 도구를 선택하세요.
-
-    사용 가능한 도구들:
-    {tools}
-
-    **선택 기준:**
-    - 파일 삭제 요청 → delete_file 선택
-    - 시간 조회 요청 → get_current_time 선택
-    - 관련 없는 도구는 절대 선택하지 마세요
-
-    정확한 도구명만 반환하세요."""),
-            ("human", "사용자 요청: {query}")
-        ])
-
-        try:
-            response = await self.model.ainvoke(
-                selection_prompt.format_messages(
-                    query=user_query,
-                    tools="\n".join(tool_descriptions)
-                )
-            )
-
-            selected_tool_name = response.content.strip()
-            self.logger.info(f"LLM이 선택한 도구: '{selected_tool_name}'")
-
-            # 선택된 도구 찾기
-            for tool in available_tools:
-                if getattr(tool, 'name', str(tool)) == selected_tool_name:
-                    self.logger.info(f"✅ 적절한 도구 선택됨: {selected_tool_name}")
-                    return tool
-
-            # 매칭 실패 시 첫 번째 도구 (폴백)
-            self.logger.warning(f"도구 매칭 실패. 첫 번째 도구 사용: {getattr(available_tools[0], 'name', 'unknown')}")
-            return available_tools[0]
-
-        except Exception as e:
-            self.logger.error(f"도구 선택 실패: {e}")
-            return available_tools[0]
-
-    async def _evaluate_results(self, state: WorkflowState) -> WorkflowState:
-        """도구 결과 평가"""
-        self.logger.info("도구 결과 평가 중...")
-
-        if not state["tool_results"]:
-            state["evaluation_results"].append({
-                "evaluation": ToolEvaluationResult.FAILURE.value,
-                "confidence": 0.0,
-                "reason": "실행된 도구가 없음"
-            })
+    async def _evaluate_results_wrapper(self, state: WorkflowState) -> WorkflowState:
+        """결과 평가 래퍼 함수"""
+        if self.result_aggregator:
+            return await self.result_aggregator.evaluate_results(state)
+        else:
+            self.logger.error("ResultAggregatorService가 초기화되지 않음")
+            state["current_step"] = "evaluation_failed"
             return state
 
-        latest_result = state["tool_results"][-1]
-
-        evaluation_prompt = ChatPromptTemplate.from_messages([
-            ("system", """당신은 도구 실행 결과를 평가하는 전문가입니다.
-다음 기준으로 결과를 평가하세요:
-
-1. 정확성: 결과가 쿼리에 정확히 답하는가?
-2. 완성도: 답변이 완전한가, 아니면 추가 정보가 필요한가?
-3. 신뢰성: 결과를 신뢰할 수 있는가?
-4. 관련성: 사용자 쿼리와 관련이 있는가?
-
-평가 결과를 JSON 형식으로:
-{{
-  "evaluation": "success|partial|failure|needs_more_info",
-  "confidence": 0.0-1.0,
-  "reason": "평가 이유",
-  "missing_info": ["부족한 정보 목록"],
-  "next_steps": ["제안하는 다음 단계"]
-}}"""),
-            ("human", """
-사용자 쿼리: {query}
-도구 결과: {tool_result}
-이전 컨텍스트: {context}
-
-평가해주세요.""")
-        ])
-
-        try:
-            response = await self.evaluator_model.ainvoke(
-                evaluation_prompt.format_messages(
-                    query=state["user_query"],
-                    tool_result=latest_result,
-                    context=state["reasoning_trace"][-3:]
-                )
-            )
-
-            # JSON 파싱 시도
-            try:
-                evaluation = json.loads(response.content)
-            except json.JSONDecodeError:
-                # JSON 파싱 실패 시 기본 평가
-                evaluation = {
-                    "evaluation": ToolEvaluationResult.PARTIAL.value,
-                    "confidence": 0.5,
-                    "reason": "평가 결과 파싱 실패",
-                    "missing_info": [],
-                    "next_steps": []
-                }
-
-            state["evaluation_results"].append(evaluation)
-            state["confidence_score"] = evaluation.get("confidence", 0.5)
-            state["reasoning_trace"].append(f"평가 결과: {evaluation['evaluation']} (신뢰도: {evaluation['confidence']})")
-
-        except Exception as e:
-            self.logger.error(f"결과 평가 실패: {e}")
-            state["evaluation_results"].append({
-                "evaluation": ToolEvaluationResult.FAILURE.value,
-                "confidence": 0.0,
-                "reason": f"평가 실패: {str(e)}"
-            })
-
-        state["current_step"] = "results_evaluated"
-        state["iteration_count"] += 1
-
-        return state
-
-    async def _synthesize_answer(self, state: WorkflowState) -> WorkflowState:
-        """최종 답변 합성"""
-        self.logger.info("최종 답변 합성 중...")
-
-        # 적합한 도구가 없는 경우 특별 처리
-        if state.get("current_step") == "no_suitable_tools":
-            synthesis_prompt = ChatPromptTemplate.from_messages([
-                ("system", """당신은 사용자에게 정중하고 도움이 되는 답변을 제공하는 AI 어시스턴트입니다.
-현재 상황에서는 사용자의 요청에 적합한 도구가 없어서 실시간 정보를 제공할 수 없습니다.
-
-다음과 같이 답변하세요:
-1. 사용자의 요청을 이해했음을 표현
-2. 현재 해당 정보를 제공할 수 있는 도구가 없음을 정중하게 설명
-3. 일반적인 정보나 대안을 제공 (가능한 경우)
-4. 다른 방법이나 추천 사항 제시
-
-사용자 요청: {query}
-사용 가능한 도구들: {available_tools}
-추론 과정: {reasoning_trace}"""),
-                ("human", "적절한 답변을 제공해주세요.")
-            ])
-
-            tool_names = [tool.name if hasattr(tool, 'name') else str(tool) for tool in self.tools]
-
-            try:
-                response = await self.model.ainvoke(
-                    synthesis_prompt.format_messages(
-                        query=state["user_query"],
-                        available_tools=", ".join(tool_names) if tool_names else "없음",
-                        reasoning_trace=state["reasoning_trace"]
-                    )
-                )
-
-                state["final_answer"] = response.content
-                state["current_step"] = "answer_synthesized"
-
-            except Exception as e:
-                self.logger.error(f"답변 합성 실패: {e}")
-                state[
-                    "final_answer"] = f"죄송합니다. 현재 '{state['user_query']}'에 대한 실시간 정보를 제공할 수 있는 도구가 없어서 정확한 답변을 드리기 어렵습니다. 다른 질문이 있으시면 언제든지 말씀해 주세요."
-
+    async def _synthesize_answer_wrapper(self, state: WorkflowState) -> WorkflowState:
+        """답변 합성 래퍼 함수"""
+        if self.result_aggregator:
+            return await self.result_aggregator.synthesize_answer(state)
         else:
-            # 기존 로직: 도구 결과를 바탕으로 답변 합성
-            synthesis_prompt = ChatPromptTemplate.from_messages([
-                ("system", """당신은 수집된 정보를 바탕으로 최종 답변을 합성하는 전문가입니다.
-다음 정보들을 종합하여 사용자 쿼리에 대한 정확하고 완전한 답변을 제공하세요:
-
-- 사용자 쿼리: {query}
-- 도구 실행 결과들: {tool_results}
-- 평가 결과들: {evaluation_results}
-- 추론 과정: {reasoning_trace}
-
-답변은 다음과 같이 구성하세요:
-1. 직접적인 답변
-2. 근거가 되는 정보
-3. 신뢰도 및 한계점 (필요시)"""),
-                ("human", "최종 답변을 합성해주세요.")
-            ])
-
-            try:
-                response = await self.model.ainvoke(
-                    synthesis_prompt.format_messages(
-                        query=state["user_query"],
-                        tool_results=state["tool_results"],
-                        evaluation_results=state["evaluation_results"],
-                        reasoning_trace=state["reasoning_trace"]
-                    )
-                )
-
-                state["final_answer"] = response.content
-                state["current_step"] = "answer_synthesized"
-
-            except Exception as e:
-                self.logger.error(f"답변 합성 실패: {e}")
-                state["final_answer"] = f"답변 합성 중 오류가 발생했습니다: {str(e)}"
-
-        return state
+            self.logger.error("ResultAggregatorService가 초기화되지 않음")
+            state["final_answer"] = "답변 합성 서비스를 사용할 수 없습니다."
+            return state
 
     async def _quality_check(self, state: WorkflowState) -> WorkflowState:
         """품질 검사"""
@@ -1669,7 +1386,10 @@ JSON 형식으로 응답하세요:
             "workflow_active": self.workflow is not None,
             # HITL 상태 정보
             "hitl_config": self.hitl_config,
-            "human_input_callback_set": self.human_input_callback is not None
+            "human_input_callback_set": self.human_input_callback is not None,
+            # 분리된 서비스 상태 추가
+            "agent_executor_initialized": self.agent_executor is not None,
+            "result_aggregator_initialized": self.result_aggregator is not None
         }
 
     async def cleanup_mcp_client(self):
