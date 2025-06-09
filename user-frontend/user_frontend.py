@@ -207,11 +207,6 @@ def extract_approval_details(hitl_message: str) -> dict:
         details["type"] = "tool_execution"
         details["options"] = ["approved", "rejected", "modified"]
 
-    # 낮은 신뢰도 승인
-    elif any(keyword in message_lower for keyword in ["낮은 신뢰도", "신뢰도는 낮습니다", "low confidence"]):
-        details["type"] = "low_confidence"
-        details["options"] = ["approved", "rejected", "need_input"]
-
     # 최종 답변 승인
     elif any(keyword in message_lower for keyword in ["최종 답변", "final answer"]):
         details["type"] = "final_answer"
@@ -256,21 +251,6 @@ def render_hitl_approval_ui(hitl_message: str, approval_details: dict,
         with col3:
             if st.button("✏️ 수정", key="modify_tool"):
                 approval_response = "modified"
-
-    elif approval_details["type"] == "low_confidence":
-        confidence = approval_details.get("confidence", 0.0)
-        st.warning(f"⚠️ 낮은 신뢰도 ({confidence:.2f}) 결과입니다. 계속 진행하시겠습니까?")
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            if st.button("✅ 진행", key="approve_confidence", type="primary"):
-                approval_response = "approved"
-        with col2:
-            if st.button("❌ 중단", key="reject_confidence"):
-                approval_response = "rejected"
-        with col3:
-            if st.button("💭 추가 정보 제공", key="need_input"):
-                approval_response = "need_input"
 
     elif approval_details["type"] == "final_answer":
         st.info("✅ 최종 답변 승인이 필요합니다.")
@@ -340,17 +320,7 @@ def main():
         if hitl_enabled:
             st.subheader("승인 옵션")
             require_tool_approval = st.checkbox("🔧 도구 실행 전 승인", value=True)
-            require_low_confidence_approval = st.checkbox("⚠️ 낮은 신뢰도 시 승인", value=True)
             require_final_approval = st.checkbox("✅ 최종 답변 승인", value=False)
-
-            confidence_threshold = st.slider(
-                "신뢰도 임계값",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.7,
-                step=0.1,
-                help="이 값 이하의 신뢰도에서 승인 요청"
-            )
 
         st.markdown("---")
         st.header("📊 서버 상태")
@@ -638,23 +608,6 @@ def main():
             # HITL 요청이 있으면 페이지 새로고침
             if st.session_state.waiting_for_approval:
                 st.rerun()
-
-    # 도움말
-    with st.expander("💡 HITL 사용법", expanded=False):
-        st.markdown("""
-        ### Human-in-the-Loop 기능 사용법
-
-        1. **고위험 작업 승인**: AI가 삭제, 수정 등 위험한 작업을 수행하려 할 때 승인 요청
-        2. **낮은 신뢰도 승인**: 결과의 신뢰도가 낮을 때 계속 진행할지 확인
-        3. **최종 답변 승인**: 답변을 사용자에게 제공하기 전 최종 검토
-        4. **추가 정보 요청**: AI가 더 정확한 답변을 위해 추가 정보 요청
-
-        ### 테스트 쿼리 예시
-        - "중요한 파일을 삭제해줘" (고위험 작업 승인 테스트)
-        - "시스템 설정을 변경해줘" (도구 승인 테스트)
-        - "복잡한 분석을 해줘" (낮은 신뢰도 테스트)
-        - "안전한 작업을 해줘" (일반 작업)
-        """)
 
 
 if __name__ == "__main__":

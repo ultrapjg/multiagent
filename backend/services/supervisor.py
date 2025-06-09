@@ -72,7 +72,7 @@ class SupervisorService:
         self.hitl_config = {
             "enabled": True,
             "require_approval_for_tools": False,  # 도구 실행 전 승인 필요
-            "require_approval_for_low_confidence": True,  # 낮은 신뢰도 시 승인 필요
+            "require_approval_for_low_confidence": False,  # 낮은 신뢰도 시 승인 필요
             "require_approval_for_final_answer": False,  # 최종 답변 전 승인 필요
             "confidence_threshold": 0.7,  # 이 값 이하면 human approval 요청
             "high_impact_tools": ["file_operations", "external_api_calls", "system_commands"]  # 고위험 도구
@@ -168,7 +168,7 @@ class SupervisorService:
             if hitl_enabled:
                 self.hitl_config.update({
                     "require_approval_for_tools": True,  # 도구 승인 활성화
-                    "require_approval_for_low_confidence": True,  # 낮은 신뢰도 승인 활성화
+                    "require_approval_for_low_confidence": False,  # 낮은 신뢰도 승인 활성화
                     "confidence_threshold": 0.8,  # 임계값을 높여서 더 자주 트리거
                     # 고위험 키워드
                     "high_impact_tools": [
@@ -906,17 +906,6 @@ JSON 형식으로 응답하세요:
 
             return message
 
-        elif approval_type == HumanApprovalType.LOW_CONFIDENCE.value:
-            confidence = pending_decision.get("confidence", 0.0)
-            result = pending_decision.get("result", "")
-            return f"""⚠️ 낮은 신뢰도 결과 승인 요청
-
-현재 신뢰도: {confidence:.2f}
-결과: {result}
-이유: 신뢰도가 임계값({self.hitl_config.get('confidence_threshold', 0.7)}) 이하입니다.
-
-계속 진행하시겠습니까? (approved/rejected/need_input)"""
-
         elif approval_type == HumanApprovalType.FINAL_ANSWER.value:
             answer = pending_decision.get("answer", "")
             return f"""✅ 최종 답변 승인 요청
@@ -1107,18 +1096,6 @@ JSON 형식으로 응답하세요:
         self.logger.info(
             f"평가 결과 확인: type={evaluation_type}, confidence={confidence:.2f}, iteration={state['iteration_count']}")
 
-        # 낮은 신뢰도에 대한 Human approval 체크
-        if (self.hitl_config.get("enabled", False) and
-                self.hitl_config.get("require_approval_for_low_confidence", False) and
-                confidence < self.hitl_config.get("confidence_threshold", 0.7)):
-            state["pending_decision"] = {
-                "type": HumanApprovalType.LOW_CONFIDENCE.value,
-                "confidence": confidence,
-                "result": latest_evaluation.get("reason", ""),
-                "evaluation_type": evaluation_type
-            }
-            return "need_approval"
-
         # 기존 로직
         if confidence >= 1.0:
             self.logger.info(f"완벽한 신뢰도({confidence:.2f}) 달성 - 즉시 답변 합성")
@@ -1253,33 +1230,6 @@ JSON 형식으로 응답하세요:
                     # 시스템 로그
                     if node_state.get("current_step"):
                         self.logger.info(f"워크플로우 단계: {node_state['current_step']} (노드: {node_name}) - 스텝: {step_count}")
-
-                    # 평가 결과에서 낮은 신뢰도 감지 시 즉시 HITL 트리거
-                    if (node_name == "evaluate_results" and
-                            node_state.get("evaluation_results") and
-                            not answer_provided):
-
-                        try:
-                            latest_eval = node_state["evaluation_results"][-1]
-                            confidence = latest_eval.get("confidence", 1.0)
-
-                            if (self.hitl_config.get("enabled", False) and
-                                    self.hitl_config.get("require_approval_for_low_confidence", False) and
-                                    confidence < self.hitl_config.get("confidence_threshold", 0.7)):
-                                self.logger.info(f"낮은 신뢰도({confidence:.2f}) 감지 - 즉시 HITL 트리거")
-
-                                hitl_message = f"""⚠️ 낮은 신뢰도 결과 승인 요청
-
-현재 신뢰도: {confidence:.2f}
-결과: {latest_eval.get('reason', '신뢰도가 낮습니다')}
-이유: 신뢰도가 임계값({self.hitl_config.get('confidence_threshold', 0.7)}) 이하입니다.
-
-계속 진행하시겠습니까? (approved/rejected/need_input)"""
-
-                                yield f"\n🤚 **Human Approval 필요**\n{hitl_message}\n"
-                                self.logger.info("낮은 신뢰도 HITL 트리거됨")
-                        except Exception as e:
-                            self.logger.error(f"신뢰도 기반 HITL 처리 실패: {e}")
 
                     final_state = node_state
 
