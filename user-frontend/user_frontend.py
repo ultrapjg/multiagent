@@ -239,7 +239,6 @@ def render_hitl_approval_ui(hitl_message: str, approval_details: dict,
 
         if keywords:
             st.error(f"⚠️ 고위험 키워드 감지: {', '.join(keywords)}")
-        st.warning(f"🔧 도구 '{tool_name}' 실행 승인이 필요합니다.")
 
         col1, col2, col3 = st.columns(3)
         with col1:

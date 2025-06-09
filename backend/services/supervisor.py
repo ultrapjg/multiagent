@@ -868,7 +868,6 @@ JSON 형식으로 응답하세요:
         return f"""{risk_emoji} 고위험 작업 승인 요청
 
 감지된 키워드: {', '.join(keywords) if keywords else '없음'}
-실행 도구: {tool_name}
 요청 내용: {state['user_query']}
 위험도: {risk_level}
 
@@ -894,10 +893,7 @@ JSON 형식으로 응답하세요:
             message = f"""{risk_emoji} 고위험 도구 실행 승인 요청
 
 감지된 키워드: {', '.join(keywords) if keywords else '없음'}
-실행 예정 도구: {tool_name}
-사용 가능한 도구들: {', '.join(available_tools) if available_tools else '없음'}
-실행 인수: {json.dumps(tool_args, ensure_ascii=False, indent=2)}
-감지 이유: {reason}
+요청 내용: {state['user_query']}
 위험도: {risk_level}
 
 ⚠️ 이 작업은 시스템에 영향을 줄 수 있습니다.
@@ -1018,8 +1014,6 @@ JSON 형식으로 응답하세요:
                 approval_message = f"""🔴 고위험 작업 승인 요청
 
 감지된 키워드: {', '.join(detected_keywords)}
-실행 예정 도구: {representative_tool}
-작업 내용: {tool_description}
 요청 내용: {state['user_query']}
 위험도: 높음
 
@@ -1238,9 +1232,7 @@ JSON 형식으로 응답하세요:
                                 if isinstance(pending_decision, dict):
                                     approval_message = f"""🤖 고위험 작업 승인 요청
 
-작업: {pending_decision.get('tool_name', 'unknown')}
 요청: {node_state.get('user_query', 'unknown')}
-이유: {pending_decision.get('reason', 'unknown')}
 
 승인하시겠습니까? (approved/rejected)"""
                             else:
