@@ -2,19 +2,19 @@ apiVersion: skaffold/v4beta6
 kind: Config
 build:
   artifacts:
-  - image: backend
-    context: backend
-    buildpacks:
-      builder: paketobuildpacks/builder-jammy-base
-  - image: admin-frontend
-    context: admin-frontend
-    buildpacks:
-      builder: paketobuildpacks/builder-jammy-base
-  - image: user-frontend
-    context: user-frontend
-    buildpacks:
-      builder: paketobuildpacks/builder-jammy-base
+    - image: backend
+      context: backend
+      buildpacks:
+        builder: paketobuildpacks/builder-jammy-base
+    - image: admin-frontend
+      context: admin-frontend
+      buildpacks:
+        builder: paketobuildpacks/builder-jammy-base
+    - image: user-frontend
+      context: user-frontend
+      buildpacks:
+        builder: paketobuildpacks/builder-jammy-base
 deploy:
-  docker:
-    composeFiles:
-      - docker/docker-compose.yml
+  kubectl:
+    manifests:
+      - k8s/*.yaml

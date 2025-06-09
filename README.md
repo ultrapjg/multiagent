@@ -46,9 +46,3 @@ pack build user-frontend --path user-frontend --builder paketobuildpacks/builder
 ## Skaffold를 이용한 자동 재배포
 [Skaffold](https://skaffold.dev/)를 사용하면 소스 코드 변경 시 자동으로 빌드와 배포가 이루어집니다.
 
-```bash
-skaffold dev
-```
-
-`skaffold.yaml` 파일에 정의된 대로 Paketo Buildpack으로 이미지를 빌드하고,
-`docker/docker-compose.yml`을 사용해 컨테이너를 실행합니다.
