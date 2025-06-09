@@ -16,6 +16,9 @@ spec:
         - name: user-frontend
           image: asia-docker.pkg.dev/architect-certification-289902/user-frontend/user-frontend:latest
           command: ["streamlit", "run", "user-frontend/main.py", "--server.port=8502", "--server.address=0.0.0.0"]
+          env:
+            - name: BACKEND_URL
+              value: http://backend:8000
           ports:
             - containerPort: 8502
 ---
