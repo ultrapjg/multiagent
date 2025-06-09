@@ -1,20 +1,25 @@
-apiVersion: skaffold/v2beta10
+apiVersion: skaffold/v2beta29
 kind: Config
+
 build:
+  local:
+    push: true
   artifacts:
-    - image: backend
-      context: backend
-      buildpacks:
-        builder: paketobuildpacks/builder-jammy-base
-    - image: admin-frontend
-      context: admin-frontend
-      buildpacks:
-        builder: paketobuildpacks/builder-jammy-base
-    - image: user-frontend
-      context: user-frontend
-      buildpacks:
-        builder: paketobuildpacks/builder-jammy-base
+    - image: asia-docker.pkg.dev/architect-certification-289902/backend/backend
+      context: .
+      docker:
+        dockerfile: docker/backend.Dockerfile
+    - image: asia-docker.pkg.dev/architect-certification-289902/user-frontend/user-frontend
+      context: .
+      docker:
+        dockerfile: docker/user-frontend.Dockerfile
+    - image: asia-docker.pkg.dev/architect-certification-289902/admin-frontend/admin-frontend
+      context: .
+      docker:
+        dockerfile: docker/admin-frontend.Dockerfile
+
 deploy:
   kubectl:
     manifests:
       - k8s/*.yaml
+
