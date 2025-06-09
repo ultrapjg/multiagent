@@ -19,7 +19,7 @@ services:
       context: .
       dockerfile: docker/user-frontend.Dockerfile
     ports:
-      - "8501:8501"
+      - "8502:8502"
     depends_on:
       - backend
     environment:
@@ -32,7 +32,7 @@ services:
       context: .
       dockerfile: docker/admin-frontend.Dockerfile
     ports:
-      - "8502:8502"
+      - "8501:8501"
     depends_on:
       - backend
     environment:
