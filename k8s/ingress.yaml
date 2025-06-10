@@ -4,19 +4,26 @@ metadata:
   name: frontend-ingress
 spec:
   rules:
-    - http:
-        paths:
-          - path: /admin
-            pathType: Prefix
-            backend:
-              service:
-                name: admin-frontend
-                port:
-                  number: 8501
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: user-frontend
-                port:
-                  number: 8502
+  - http:
+      paths:
+      - path: /admin/
+        pathType: Prefix
+        backend:
+          service:
+            name: admin-frontend
+            port:
+              number: 8501
+      - path: /admin
+        pathType: Prefix
+        backend:
+          service:
+            name: admin-frontend
+            port:
+              number: 8501
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: user-frontend
+            port:
+              number: 8502
