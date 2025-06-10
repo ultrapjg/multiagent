@@ -15,7 +15,16 @@ spec:
       containers:
         - name: admin-frontend
           image: asia-docker.pkg.dev/architect-certification-289902/admin-frontend/admin-frontend:latest
-          command: ["streamlit", "run", "admin-frontend/main.py", "--server.port=8501", "--server.address=0.0.0.0"]
+          # Ingress forwards requests under the /admin path without rewriting.
+          # Configure Streamlit to serve from the same base path so that
+          # static assets resolve correctly when accessed via the Ingress.
+          command:
+            - "streamlit"
+            - "run"
+            - "admin-frontend/main.py"
+            - "--server.port=8501"
+            - "--server.address=0.0.0.0"
+            - "--server.baseUrlPath=/admin"
           env:
             - name: BACKEND_URL
               value: http://backend:8000
