@@ -47,6 +47,21 @@ skaffold dev
 
 이 명령은 모든 이미지를 빌드한 후 `k8s` 디렉터리의 매니페스트를 적용하여 애플리케이션을 실행합니다.
 
+### Ingress 경로 설정
+`k8s/ingress.yaml`에서는 운영자 대시보드를 `/admin` 경로로 노출합니다. Ingress가 경로를 그대로 전달하므로, `admin-frontend`는 다음과 같이 `--server.baseUrlPath=/admin` 옵션을 사용하여 해당 하위 경로에서 동작하도록 설정되어 있습니다.
+
+```yaml
+command:
+  - "streamlit"
+  - "run"
+  - "admin-frontend/main.py"
+  - "--server.port=8501"
+  - "--server.address=0.0.0.0"
+  - "--server.baseUrlPath=/admin"
+```
+
+이를 통해 `/admin` 접두사가 있는 URL에서도 정적 자산이 올바르게 로드됩니다.
+
 
 
 ### Kubernetes Secrets
