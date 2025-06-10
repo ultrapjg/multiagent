@@ -60,6 +60,8 @@ command:
   - "--server.baseUrlPath=/admin"
 ```
 
+서비스 헬스체크는 기본적으로 `/` 경로를 사용합니다. 관리자 페이지가 `/admin` 하위에서 동작하기 때문에 `k8s/backend-config.yaml` 파일로 헬스체크 경로를 `/admin`으로 지정했습니다. Service 메타데이터의 `cloud.google.com/backend-config` 주석을 통해 이를 적용합니다.
+
 이를 통해 `/admin` 접두사가 있는 URL에서도 정적 자산이 올바르게 로드됩니다.
 
 

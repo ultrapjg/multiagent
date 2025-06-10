@@ -34,6 +34,8 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    cloud.google.com/backend-config: '{"default": "admin-frontend-config"}'
   name: admin-frontend
 spec:
   selector:
