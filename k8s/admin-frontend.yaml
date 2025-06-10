@@ -33,3 +33,4 @@ spec:
     - port: 8501
       targetPort: 8501
   type: LoadBalancer
+  loadBalancerIP: 34.84.97.177
