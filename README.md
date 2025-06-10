@@ -34,17 +34,19 @@ Docker를 사용해 각 서비스를 컨테이너로 실행할 수 있습니다.
 - admin-frontend: `8501`
 - user-frontend: `8502`
 
-## Paketo Buildpack으로 이미지 빌드
-`pack` CLI가 설치되어 있다면 Paketo Python Buildpack을 사용해 이미지를 생성할 수 있습니다.
-
-```bash
-pack build backend --path backend --builder paketobuildpacks/builder-jammy-base
-pack build admin-frontend --path admin-frontend --builder paketobuildpacks/builder-jammy-base
-pack build user-frontend --path user-frontend --builder paketobuildpacks/builder-jammy-base
-```
 
 ## Skaffold를 이용한 자동 재배포
 [Skaffold](https://skaffold.dev/)를 사용하면 소스 코드 변경 시 자동으로 빌드와 배포가 이루어집니다.
+
+### 기동 테스트
+Kubernetes 클러스터가 준비되었다면 다음 명령으로 서비스를 배포하고 변경 사항을 실시간으로 반영할 수 있습니다.
+
+```bash
+skaffold dev
+```
+
+이 명령은 모든 이미지를 빌드한 후 `k8s` 디렉터리의 매니페스트를 적용하여 애플리케이션을 실행합니다.
+
 
 
 ### Kubernetes Secrets
