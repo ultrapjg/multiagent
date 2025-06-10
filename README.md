@@ -46,3 +46,17 @@ pack build user-frontend --path user-frontend --builder paketobuildpacks/builder
 ## Skaffold를 이용한 자동 재배포
 [Skaffold](https://skaffold.dev/)를 사용하면 소스 코드 변경 시 자동으로 빌드와 배포가 이루어집니다.
 
+
+### Kubernetes Secrets
+Secrets can be created from your `.env` file with the helper script:
+
+```bash
+./scripts/create_secrets.sh path/to/.env
+```
+
+This uses `kubectl` to generate the `anthropic-api-key`, `openai-api-key` and `langsmith-api-key` secrets.  If you prefer to edit a file manually, `k8s/secrets.yaml` provides a template that you can apply with:
+
+```bash
+kubectl apply -f k8s/secrets.yaml
+```
+
