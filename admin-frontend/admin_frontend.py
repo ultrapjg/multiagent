@@ -4,6 +4,12 @@ import requests
 import json
 from typing import Dict, List, Any
 
+from datetime import datetime
+import pandas as pd
+import os
+
+BACKEND_URL=os.getenv("BACKEND_URL", "http://backend:8000")
+
 st.set_page_config(
     page_title="⚙️ 운영자 대시보드",
     page_icon="⚙️",
@@ -129,10 +135,10 @@ def main():
     st.markdown("---")
     
     # API 클라이언트 초기화
-    api_client = AdminAPIClient("http://localhost:8000")
+    api_client = AdminAPIClient(BACKEND_URL)
     
     # 탭 생성
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 대시보드", "🔧 도구 관리", "🤖 에이전트 관리", "📈 모니터링"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 대시보드", "🔧 도구 관리", "🤖 에이전트 관리", "📈 모니터링", "📋 사용자 요청 조회"])
     
     # =============================================================================
     # 대시보드 탭
@@ -336,7 +342,8 @@ def main():
                     "claude-3-5-haiku-latest", 
                     "claude-3-7-sonnet-latest",
                     "gpt-4o",
-                    "gpt-4o-mini"
+                    "gpt-4o-mini",
+                    "qwen2.5:32b",
                 ]
                 
                 selected_model = st.selectbox(
@@ -382,7 +389,7 @@ def main():
         with col1:
             st.write("**서버 상태:**")
             try:
-                health_response = requests.get("http://localhost:8000/health", timeout=5)
+                health_response = requests.get(BACKEND_URL+"/health", timeout=5)
                 if health_response.status_code == 200:
                     st.success("✅ 백엔드 서버 정상")
                     health_data = health_response.json()
@@ -416,6 +423,113 @@ def main():
         if auto_refresh:
             time.sleep(10)
             st.rerun()
+
+    # =============================================================================
+    # 사용자 요청 조회
+    # =============================================================================
+    with tab5:
+        st.subheader("📋 요청 목록")
+
+        if st.button("🔄 새로고침", key="main_refresh"):
+            st.rerun()
+
+        # 메시지 조회
+        success, messages = get_messages()
+
+        if not success:
+            st.error(f"메시지 로딩 실패: {messages}")
+            st.info(f"FastAPI 백엔드 서버가 실행 중인지 확인해주세요. ({BACKEND_URL})")
+            return
+
+        if not messages:
+            st.info("아직 메시지가 없습니다. 첫 번째 메시지를 작성해보세요!")
+            return
+
+        # 메시지 표시 옵션
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            st.write(f"총 {len(messages)}개의 메시지")
+        with col2:
+            view_mode = st.selectbox("보기 모드", ["카드뷰", "테이블뷰"])
+
+        st.markdown("---")
+
+        if view_mode == "카드뷰":
+            # 카드 형태로 메시지 표시
+            for i, message in enumerate(messages):
+                with st.container():
+                    col1, col2 = st.columns([10, 1])
+
+                    with col1:
+                        st.markdown(f"""
+                        <div class="message-card">
+                            <div class="message-author">👤 {message['author']}</div>
+                            <div class="message-time">🕒 {format_datetime(message['created_at'])}</div>
+                            <div class="message-content">{message['content']}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+        else:
+            # 테이블 형태로 메시지 표시
+            df_data = []
+            for message in messages:
+                df_data.append({
+                    "ID": message['id'],
+                    "작성자": message['author'],
+                    "메시지": message['content'][:100] + ("..." if len(message['content']) > 100 else ""),
+                    "작성시간": format_datetime(message['created_at'])
+                })
+
+            df = pd.DataFrame(df_data)
+
+            # 선택 가능한 데이터프레임 (최신 Streamlit 방식)
+            selected_rows = st.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row"
+            )
+
+            # 선택된 행 처리 (새로운 방식)
+            if hasattr(selected_rows, 'selection') and selected_rows.selection:
+                # selection이 존재하고 rows 속성이 있는 경우
+                if hasattr(selected_rows.selection, 'rows') and len(selected_rows.selection.rows) > 0:
+                    selected_idx = selected_rows.selection.rows[0]
+                    selected_message = messages[selected_idx]
+
+                    st.markdown("### 📄 선택된 메시지 상세")
+                    col1, col2 = st.columns([3, 1])
+
+                    with col1:
+                        st.markdown(f"""
+                                **작성자:** {selected_message['author']}  
+                                **작성시간:** {format_datetime(selected_message['created_at'])}  
+                                **메시지:**  
+                                {selected_message['content']}
+                                """)
+
+# API 엔드포인트 설정
+API_BASE_URL = BACKEND_URL
+
+def get_messages(limit: int = 100):
+    """메시지 조회 API 호출"""
+    try:
+        response = requests.get(f"{API_BASE_URL}/messages/list?limit={limit}")
+        if response.status_code == 200:
+            return True, response.json()
+        else:
+            return False, f"Error: {response.status_code} - {response.text}"
+    except requests.exceptions.RequestException as e:
+        return False, f"Connection error: {str(e)}"
+
+def format_datetime(datetime_str: str):
+    """날짜시간 포맷팅"""
+    try:
+        dt = datetime.fromisoformat(datetime_str.replace('Z', '+00:00'))
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except:
+        return datetime_str
 
 if __name__ == "__main__":
     import time

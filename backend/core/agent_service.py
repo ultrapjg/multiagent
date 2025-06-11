@@ -4,6 +4,7 @@ import os
 from typing import Dict, List, Any, AsyncGenerator, Optional
 from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
+from langchain_ollama import ChatOllama
 from langchain_mcp_adapters.client import MultiServerMCPClient, load_mcp_tools
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import InMemorySaver
@@ -72,9 +73,8 @@ class MCPAgentService:
         
         if model_name.startswith("claude"):
             return ChatAnthropic(
-                model=model_name,
-                temperature=0.1,
-                max_tokens=output_tokens.get(model_name, 8192)
+                model_name=model_name,
+                temperature=0.1
             )
         elif model_name.startswith("gpt"):
             return ChatOpenAI(
