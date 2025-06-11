@@ -3,6 +3,7 @@ import logging
 from enum import Enum
 from typing import Dict, List, Any, Optional, Tuple
 from langchain_core.prompts import ChatPromptTemplate
+import re
 
 
 class RiskLevel(Enum):
@@ -227,34 +228,95 @@ class LLMRiskAssessmentService:
         return " | ".join(context_parts) if context_parts else "추가 컨텍스트 없음"
 
     async def _parse_and_validate_assessment(self, response_content: str) -> Dict[str, Any]:
-        """LLM 응답 파싱 및 검증"""
+        """강화된 JSON 파싱 - 여러 방법으로 시도"""
+
+        # 1. 원본 응답 로깅 (디버깅용)
+        self.logger.debug(f"LLM 원본 응답: {response_content}")
+
+        # 2. 직접 JSON 파싱 시도
         try:
-            assessment = json.loads(response_content)
-
-            # 필수 필드 검증
-            required_fields = ["overall_risk_score", "risk_level", "approval_reason"]
-            for field in required_fields:
-                if field not in assessment:
-                    raise ValueError(f"필수 필드 누락: {field}")
-
-            # 위험도 점수 검증
-            risk_score = assessment["overall_risk_score"]
-            if not (0.0 <= risk_score <= 1.0):
-                raise ValueError(f"잘못된 위험도 점수: {risk_score}")
-
-            # 신뢰도 검증
-            confidence = assessment.get("confidence", 0.5)
-            if not (0.0 <= confidence <= 1.0):
-                assessment["confidence"] = 0.5
-
-            return assessment
-
+            assessment = json.loads(response_content.strip())
+            return self._validate_and_fix_assessment(assessment)
         except json.JSONDecodeError as e:
-            self.logger.error(f"JSON 파싱 실패: {e}")
-            raise ValueError(f"LLM 응답 형식 오류: {e}")
-        except Exception as e:
-            self.logger.error(f"평가 결과 검증 실패: {e}")
-            raise
+            self.logger.warning(f"직접 JSON 파싱 실패: {e}")
+
+        # 3. JSON 블록 추출 시도 (```json ``` 형태)
+        try:
+            json_match = re.search(r'```json\s*(\{.*?\})\s*```', response_content, re.DOTALL)
+            if json_match:
+                json_content = json_match.group(1)
+                assessment = json.loads(json_content)
+                return self._validate_and_fix_assessment(assessment)
+        except (json.JSONDecodeError, AttributeError) as e:
+            self.logger.warning(f"JSON 블록 추출 실패: {e}")
+
+        # 4. 첫 번째 JSON 객체 추출 시도
+        try:
+            # { 로 시작해서 } 로 끝나는 첫 번째 완전한 JSON 찾기
+            start_idx = response_content.find('{')
+            if start_idx != -1:
+                brace_count = 0
+                end_idx = start_idx
+                for i, char in enumerate(response_content[start_idx:], start_idx):
+                    if char == '{':
+                        brace_count += 1
+                    elif char == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            end_idx = i + 1
+                            break
+
+                json_content = response_content[start_idx:end_idx]
+                self.logger.info(f"추출된 JSON: {json_content}")
+                assessment = json.loads(json_content)
+                return self._validate_and_fix_assessment(assessment)
+        except (json.JSONDecodeError, ValueError) as e:
+            self.logger.warning(f"JSON 객체 추출 실패: {e}")
+
+        # 5. 최종 폴백 - 키워드 기반 평가
+        self.logger.error("모든 JSON 파싱 방법 실패 - 키워드 기반 폴백 사용")
+        raise ValueError(f"JSON 파싱 완전 실패: {response_content[:100]}...")
+
+    def _validate_and_fix_assessment(self, assessment: Dict[str, Any]) -> Dict[str, Any]:
+        """평가 결과 검증 및 수정"""
+
+        # 필수 필드 확인 및 기본값 설정
+        defaults = {
+            "overall_risk_score": 0.5,
+            "risk_level": "medium",
+            "risk_categories": [],
+            "risk_analysis": {
+                "potential_damages": [],
+                "affected_resources": [],
+                "reversibility": "불확실",
+                "impact_scope": "개인"
+            },
+            "approval_required": True,
+            "approval_reason": "평가 완료",
+            "mitigation_suggestions": [],
+            "alternative_approaches": [],
+            "confidence": 0.5
+        }
+
+        # 누락된 필드 채우기
+        for key, default_value in defaults.items():
+            if key not in assessment:
+                assessment[key] = default_value
+                self.logger.warning(f"누락된 필드 '{key}' 기본값으로 설정: {default_value}")
+
+        # 위험도 점수 검증
+        risk_score = assessment.get("overall_risk_score", 0.5)
+        if not isinstance(risk_score, (int, float)) or not (0.0 <= risk_score <= 1.0):
+            self.logger.warning(f"잘못된 위험도 점수 '{risk_score}' -> 0.5로 수정")
+            assessment["overall_risk_score"] = 0.5
+
+        # 위험도 레벨 검증
+        valid_levels = ["safe", "low", "medium", "high", "critical"]
+        if assessment.get("risk_level") not in valid_levels:
+            self.logger.warning(f"잘못된 위험도 레벨 '{assessment.get('risk_level')}' -> 'medium'으로 수정")
+            assessment["risk_level"] = "medium"
+
+        return assessment
 
     def _determine_approval_requirement(self, risk_assessment: Dict[str, Any]) -> bool:
         """위험도 평가 결과를 바탕으로 승인 필요 여부 결정"""
