@@ -7,6 +7,10 @@ import queue
 from typing import Optional
 import re
 import requests
+import os
+
+BACKEND_URL=os.getenv("BACKEND_URL", "http://backend:8000")
+BACKEND_WEBSOCKET=os.getenv("BACKEND_WEBSOCKET", "ws://backend:8000")
 
 st.set_page_config(
     page_title="🤖 AI Assistant with HITL",
@@ -145,7 +149,7 @@ def send_hitl_approval_to_backend(approval_response: str, thread_id: str = "defa
     """백엔드로 HITL 승인 응답 전송 (REST API 사용)"""
     try:
         response = requests.post(
-            "http://localhost:8000/api/user/hitl/approve",
+            f"{BACKEND_URL}/api/user/hitl/approve",
             json={
                 "approval": approval_response,
                 "thread_id": thread_id
@@ -327,7 +331,7 @@ def main():
         # 서버 상태 확인
         try:
             response = requests.get(
-                "http://localhost:8000/api/user/status",
+                f"{BACKEND_URL}/api/user/status",
                 headers={"Authorization": "Bearer user_token"},
                 timeout=5
             )
@@ -543,7 +547,7 @@ def main():
                 full_response = ""
 
                 # 웹소켓 클라이언트 생성 및 연결
-                client = HITLWebSocketClient("ws://localhost:8000/api/user/chat")
+                client = HITLWebSocketClient(f"{BACKEND_WEBSOCKET}/api/user/chat")
 
                 if client.connect():
                     # HITL 설정을 포함하여 메시지 전송

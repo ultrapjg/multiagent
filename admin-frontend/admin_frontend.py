@@ -6,6 +6,9 @@ from typing import Dict, List, Any
 
 from datetime import datetime
 import pandas as pd
+import os
+
+BACKEND_URL=os.getenv("BACKEND_URL", "http://backend:8000")
 
 st.set_page_config(
     page_title="⚙️ 운영자 대시보드",
@@ -132,7 +135,7 @@ def main():
     st.markdown("---")
     
     # API 클라이언트 초기화
-    api_client = AdminAPIClient("http://localhost:8000")
+    api_client = AdminAPIClient(BACKEND_URL)
     
     # 탭 생성
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 대시보드", "🔧 도구 관리", "🤖 에이전트 관리", "📈 모니터링", "📋 사용자 요청 조회"])
@@ -339,7 +342,8 @@ def main():
                     "claude-3-5-haiku-latest", 
                     "claude-3-7-sonnet-latest",
                     "gpt-4o",
-                    "gpt-4o-mini"
+                    "gpt-4o-mini",
+                    "qwen2.5:32b",
                 ]
                 
                 selected_model = st.selectbox(
@@ -385,7 +389,7 @@ def main():
         with col1:
             st.write("**서버 상태:**")
             try:
-                health_response = requests.get("http://localhost:8000/health", timeout=5)
+                health_response = requests.get(BACKEND_URL+"/health", timeout=5)
                 if health_response.status_code == 200:
                     st.success("✅ 백엔드 서버 정상")
                     health_data = health_response.json()
@@ -434,7 +438,7 @@ def main():
 
         if not success:
             st.error(f"메시지 로딩 실패: {messages}")
-            st.info("FastAPI 백엔드 서버가 실행 중인지 확인해주세요. (http://localhost:8000)")
+            st.info(f"FastAPI 백엔드 서버가 실행 중인지 확인해주세요. ({BACKEND_URL})")
             return
 
         if not messages:
@@ -506,7 +510,7 @@ def main():
                                 """)
 
 # API 엔드포인트 설정
-API_BASE_URL = "http://localhost:8000"
+API_BASE_URL = BACKEND_URL
 
 def get_messages(limit: int = 100):
     """메시지 조회 API 호출"""

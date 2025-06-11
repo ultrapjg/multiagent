@@ -1,46 +1,79 @@
 version: '3.8'
 
 services:
+  # PostgreSQL 데이터베이스
+  database:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: multi_agent
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: admin123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - app_network
+    restart: unless-stopped
+
+  # 백엔드 서비스
   backend:
     build:
-      context: .
+      context: ..
       dockerfile: docker/backend.Dockerfile
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=sqlite:///./shared_data.database
+      - DB_HOST=database
+      - DB_PORT=5432
+      - DB_NAME=multi_agent
+      - DB_USER=postgres
+      - DB_PASSWORD=admin123
+      # API 키 환경변수 (실제 사용시 .env 파일이나 secrets 사용 권장)
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
     volumes:
       - shared_data:/app/data
+      - ./mcp-config:/app/mcp-config
+      - ./prompts:/app/prompts
+    depends_on:
+      - database
     networks:
       - app_network
+    restart: unless-stopped
 
+  # 사용자 프론트엔드
   user-frontend:
     build:
-      context: .
+      context: ..
       dockerfile: docker/user-frontend.Dockerfile
     ports:
       - "8501:8501"
-    depends_on:
-      - backend
     environment:
       - BACKEND_URL=http://backend:8000
+    depends_on:
+      - backend
     networks:
       - app_network
+    restart: unless-stopped
 
+  # 관리자 프론트엔드
   admin-frontend:
     build:
-      context: .
+      context: ..
       dockerfile: docker/admin-frontend.Dockerfile
     ports:
       - "8502:8502"
-    depends_on:
-      - backend
     environment:
       - BACKEND_URL=http://backend:8000
+    depends_on:
+      - backend
     networks:
       - app_network
+    restart: unless-stopped
 
 volumes:
+  postgres_data:
   shared_data:
 
 networks:

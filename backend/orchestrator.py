@@ -111,6 +111,22 @@ def create_hitl_callback(thread_id: str):
     return hitl_callback
 
 
+async def get_default_model_name() -> str:
+    """기본 모델 이름을 결정하는 함수"""
+    # 1. agent_service가 초기화되어 있고 model이 있으면 해당 모델명 사용
+    if (hasattr(agent_service, 'model') and 
+        agent_service.model is not None and 
+        hasattr(agent_service.model, 'model_name')):
+        model_name = agent_service.model.model_name
+        print(f"📋 Agent Service에서 모델명 가져옴: {model_name}")
+        return model_name
+    else:
+        # 로컬 모델 사용
+        default_model = "qwen2.5:32b"
+        print(f"📋 외부 API 키 없음 - 로컬 모델 사용: {default_model}")
+        return default_model
+
+
 @app.on_event("startup")
 async def startup_event():
     print("🚀 서버 시작 중...")
@@ -118,11 +134,40 @@ async def startup_event():
         init_db()
         print("✅ 데이터베이스 초기화 완료")
 
-        # 서버 시작 시 에이전트 초기화
-        await agent_service.initialize_agent()
-        print("✅ Agent Service 초기화 완료")
+        # 🔄 개선된 에이전트 초기화 프로세스
+        
+        # 1. 먼저 기본 모델명 결정
+        default_model = await get_default_model_name()
+        
+        # 2. Agent Service 초기화
+        print(f"🤖 Agent Service 초기화 중... (모델: {default_model})")
+        agent_init_success = await agent_service.initialize_agent(model_name=default_model)
+        
+        if agent_init_success:
+            print("✅ Agent Service 초기화 완료")
+            
+            # 3. Agent Service에서 실제 사용된 모델명 가져오기
+            actual_model_name = default_model
+            if (hasattr(agent_service, 'model') and 
+                agent_service.model is not None and 
+                hasattr(agent_service.model, 'model_name')):
+                actual_model_name = agent_service.model.model_name
+                print(f"📋 Agent Service 실제 사용 모델: {actual_model_name}")
+            
+            # 4. Supervisor Service를 같은 모델로 초기화
+            print(f"👥 Supervisor Service 초기화 중... (모델: {actual_model_name})")
+            
+            # Supervisor 서비스를 글로벌로 하나만 생성하지 말고,
+            # 필요시 동적으로 생성하도록 변경
+            print(f"✅ Supervisor Service는 요청시 동적으로 생성됩니다 (기본 모델: {actual_model_name})")
+            
+        else:
+            print("❌ Agent Service 초기화 실패")
+            
     except Exception as e:
         print(f"❌ 초기화 실패: {e}")
+        import traceback
+        traceback.print_exc()
         raise e
     print("🎉 서버 시작 완료!")
 
@@ -130,8 +175,59 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """서버 종료 시 정리"""
-    for supervisor in supervisor_instances.values():
-        await supervisor.cleanup_mcp_client()
+    print("🔄 서버 종료 중...")
+    
+    # Supervisor 인스턴스들 정리
+    for thread_id, supervisor in supervisor_instances.items():
+        try:
+            await supervisor.cleanup_mcp_client()
+            print(f"✅ Supervisor 정리 완료: {thread_id}")
+        except Exception as e:
+            print(f"⚠️ Supervisor 정리 중 오류 ({thread_id}): {e}")
+    
+    # Agent Service 정리
+    if hasattr(agent_service, 'cleanup_mcp_client'):
+        try:
+            await agent_service.cleanup_mcp_client()
+            print("✅ Agent Service 정리 완료")
+        except Exception as e:
+            print(f"⚠️ Agent Service 정리 중 오류: {e}")
+    
+    print("✅ 서버 종료 완료")
+
+
+async def get_or_create_supervisor(thread_id: str) -> SupervisorService:
+    """스레드별 Supervisor 인스턴스 생성 또는 반환"""
+    if thread_id not in supervisor_instances:
+        print(f"🔄 새로운 Supervisor 생성 중... (thread: {thread_id})")
+        
+        # Agent Service에서 사용 중인 모델명 가져오기
+        model_name = "claude-3-5-sonnet-latest"  # 기본값
+        
+        if (hasattr(agent_service, 'model') and 
+            agent_service.model is not None and 
+            hasattr(agent_service.model, 'model_name')):
+            model_name = agent_service.model.model_name
+            print(f"📋 Agent Service 모델명 사용: {model_name}")
+        else:
+            # Agent Service가 초기화되지 않았다면 기본 모델명 다시 결정
+            model_name = await get_default_model_name()
+            print(f"📋 기본 모델명 사용: {model_name}")
+        
+        # 새 Supervisor 생성
+        supervisor = SupervisorService()
+        supervisor.set_human_input_callback(create_hitl_callback(thread_id))
+        
+        # Agent Service와 같은 모델로 초기화
+        await supervisor.initialize_agent(
+            model_name=model_name,
+            hitl_enabled=True
+        )
+        
+        supervisor_instances[thread_id] = supervisor
+        print(f"✅ Supervisor 생성 완료 (thread: {thread_id}, model: {model_name})")
+    
+    return supervisor_instances[thread_id]
 
 
 @app.websocket("/api/user/chat")
@@ -142,17 +238,8 @@ async def websocket_endpoint_user(websocket: WebSocket):
     try:
         active_websockets[thread_id] = websocket
 
-        # Supervisor 초기화
-        if thread_id not in supervisor_instances:
-            supervisor = SupervisorService()
-            supervisor.set_human_input_callback(create_hitl_callback(thread_id))
-            await supervisor.initialize_agent(
-                model_name="qwen2.5:32b",
-                hitl_enabled=True
-            )
-            supervisor_instances[thread_id] = supervisor
-        else:
-            supervisor = supervisor_instances[thread_id]
+        # 🔄 개선된 Supervisor 초기화
+        supervisor = await get_or_create_supervisor(thread_id)
 
         # 🚨 핵심: 메시지 처리를 논블로킹으로 변경
         chat_task = None
@@ -234,6 +321,10 @@ async def websocket_endpoint_user(websocket: WebSocket):
         print("WebSocket 연결 종료")
     except Exception as e:
         print(f"WebSocket 오류: {e}")
+    finally:
+        # 연결 정리
+        if thread_id in active_websockets:
+            del active_websockets[thread_id]
 
 
 async def process_chat_message(websocket, supervisor, message, thread_id):
@@ -288,7 +379,8 @@ async def get_user_status(user=Depends(get_current_user)):
         return {
             "agent_ready": status.get("is_initialized", False),
             "tools_available": status.get("tools_count", 0),
-            "hitl_config": status.get("hitl_config", {})
+            "hitl_config": status.get("hitl_config", {}),
+            "model_name": status.get("model_name", "Unknown")
         }
     else:
         # Supervisor가 없으면 Agent Service 상태 반환
@@ -296,7 +388,8 @@ async def get_user_status(user=Depends(get_current_user)):
         return {
             "agent_ready": status["is_initialized"],
             "tools_available": status["tools_count"],
-            "hitl_config": {}
+            "hitl_config": {},
+            "model_name": status.get("model_name", "Unknown")
         }
 
 
@@ -344,21 +437,67 @@ async def apply_tool_changes(admin=Depends(get_admin_user)):
 @app.get("/api/admin/agent/status")
 async def get_agent_status(admin=Depends(get_admin_user)):
     """에이전트 상태 정보"""
-    return await agent_service.get_agent_status()
+    agent_status = await agent_service.get_agent_status()
+    
+    # Supervisor 인스턴스들의 상태도 포함
+    supervisor_statuses = {}
+    for thread_id, supervisor in supervisor_instances.items():
+        try:
+            supervisor_status = await supervisor.get_agent_status()
+            supervisor_statuses[thread_id] = {
+                "is_initialized": supervisor_status.get("is_initialized", False),
+                "model_name": supervisor_status.get("model_name", "Unknown"),
+                "tools_count": supervisor_status.get("tools_count", 0),
+                "hitl_enabled": supervisor_status.get("hitl_config", {}).get("enabled", False)
+            }
+        except Exception as e:
+            supervisor_statuses[thread_id] = {"error": str(e)}
+    
+    return {
+        "agent_service": agent_status,
+        "supervisor_instances": supervisor_statuses,
+        "total_supervisor_instances": len(supervisor_instances)
+    }
 
 
 @app.post("/api/admin/agent/reinitialize")
 async def reinitialize_agent(config: AgentConfig, admin=Depends(get_admin_user)):
     """에이전트 재초기화"""
     try:
+        # 1. Agent Service 재초기화
         success = await agent_service.initialize_agent(
             model_name=config.model_name,
             system_prompt=config.system_prompt
         )
-        if success:
-            return {"message": "에이전트가 성공적으로 재초기화되었습니다."}
-        else:
-            raise HTTPException(status_code=500, detail="에이전트 초기화 실패")
+        
+        if not success:
+            raise HTTPException(status_code=500, detail="Agent Service 초기화 실패")
+        
+        # 2. 모든 Supervisor 인스턴스도 새 모델로 재초기화
+        updated_supervisors = []
+        failed_supervisors = []
+        
+        for thread_id, supervisor in list(supervisor_instances.items()):
+            try:
+                await supervisor.initialize_agent(
+                    model_name=config.model_name,
+                    hitl_enabled=True
+                )
+                updated_supervisors.append(thread_id)
+                print(f"✅ Supervisor 재초기화 완료: {thread_id} -> {config.model_name}")
+            except Exception as e:
+                print(f"❌ Supervisor 재초기화 실패: {thread_id} -> {e}")
+                failed_supervisors.append({"thread_id": thread_id, "error": str(e)})
+                # 실패한 인스턴스는 제거
+                del supervisor_instances[thread_id]
+        
+        return {
+            "message": f"에이전트가 성공적으로 재초기화되었습니다 (모델: {config.model_name})",
+            "agent_service": "재초기화 완료",
+            "updated_supervisors": updated_supervisors,
+            "failed_supervisors": failed_supervisors
+        }
+        
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"초기화 실패: {str(e)}")
 
@@ -373,6 +512,8 @@ async def get_admin_stats(admin=Depends(get_admin_user)):
         "active_tools": len(tools),
         "agent_initialized": agent_status["is_initialized"],
         "model_name": agent_status.get("model_name", "None"),
+        "supervisor_instances": len(supervisor_instances),
+        "active_websockets": len(active_websockets),
         "total_conversations": 0,  # TODO: 실제 대화 수 계산
         "daily_users": 1  # TODO: 실제 사용자 수 계산
     }
