@@ -9,6 +9,20 @@ metadata:
     networking.gke.io/managed-certificates: "langgraph-mcp-ssl-cert"
     nginx.ingress.kubernetes.io/rewrite-target: /
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # WebSocket 지원을 위한 어노테이션
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+      proxy_http_version 1.1;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header Host $host;
+      proxy_cache_bypass $http_upgrade;
+    # 백엔드 설정 참조
+    cloud.google.com/backend-config: '{"default": "backend-config"}'      
 spec:
   rules:
   - host: "your-domain.com"

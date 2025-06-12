@@ -50,6 +50,10 @@ metadata:
   annotations:
     cloud.google.com/load-balancer-type: "External"
     networking.gke.io/load-balancer-type: "External"
+    # WebSocket 지원을 위한 LoadBalancer 설정
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "http"
+    service.beta.kubernetes.io/aws-load-balancer-connection-idle-timeout: "3600"
+    cloud.google.com/backend-config: '{"default": "backend-config"}'
 spec:
   type: LoadBalancer
   selector:

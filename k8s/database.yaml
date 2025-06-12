@@ -15,6 +15,16 @@ spec:
       labels:
         app: postgres
     spec:
+      initContainers:
+      - name: clean-data
+        image: busybox
+        command:
+        - sh
+        - -c
+        - rm -rf /var/lib/postgresql/data/* && mkdir -p /var/lib/postgresql/data/pgdata
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data            
       containers:
       - name: postgres
         image: postgres:15-alpine
@@ -36,6 +46,8 @@ spec:
             configMapKeyRef:
               name: app-config
               key: DB_PASSWORD
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
         volumeMounts:
         - name: postgres-storage
           mountPath: /var/lib/postgresql/data
