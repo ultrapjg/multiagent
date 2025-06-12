@@ -1,0 +1,108 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-deployment
+  namespace: langgraph-mcp-agents
+  labels:
+    app: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      initContainers:
+      - name: wait-for-postgres
+        image: postgres:15-alpine
+        command:
+        - sh
+        - -c
+        - |
+          until pg_isready -h postgres-service -p 5432 -U postgres; do
+            echo "Waiting for postgres..."
+            sleep 2
+          done
+      containers:
+      - name: backend
+        image: asia-docker.pkg.dev/architect-certification-289902/backend/backend:v1
+        ports:
+        - containerPort: 8000
+        env:
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: api-keys-secret
+              key: ANTHROPIC_API_KEY
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: api-keys-secret
+              key: OPENAI_API_KEY
+        - name: LANGSMITH_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: api-keys-secret
+              key: LANGSMITH_API_KEY
+        envFrom:
+        - configMapRef:
+            name: app-config
+        volumeMounts:
+        - name: shared-data
+          mountPath: /app/data
+        - name: mcp-config
+          mountPath: /app/mcp-config
+        - name: prompts
+          mountPath: /app/prompts
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      volumes:
+      - name: shared-data
+        persistentVolumeClaim:
+          claimName: shared-data-pvc
+      - name: mcp-config
+        configMap:
+          name: mcp-config
+      - name: prompts
+        configMap:
+          name: prompts-config
+
+---
+# ==================================================
+# 8. Backend Service
+# ==================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service
+  namespace: langgraph-mcp-agents
+  labels:
+    app: backend
+spec:
+  selector:
+    app: backend
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
+  type: ClusterIP

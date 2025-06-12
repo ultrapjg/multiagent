@@ -1,0 +1,41 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: langgraph-mcp-ingress
+  namespace: langgraph-mcp-agents
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    kubernetes.io/ingress.global-static-ip-name: "langgraph-mcp-ip"
+    networking.gke.io/managed-certificates: "langgraph-mcp-ssl-cert"
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  rules:
+  - host: "your-domain.com"
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: user-frontend-service
+            port:
+              number: 8501
+      - path: /admin
+        pathType: Prefix
+        backend:
+          service:
+            name: admin-frontend-service
+            port:
+              number: 8502
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: backend-service
+            port:
+              number: 8000
+  tls:
+  - hosts:
+    - "your-domain.com"
+    secretName: langgraph-mcp-tls
