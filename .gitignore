@@ -3,3 +3,4 @@ backend/core/__pycache__
 
 backend/core/test.code-workspace
 .env
+k8s/secret.yaml

@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-frontend-deployment
+  namespace: langgraph-mcp-agents
+  labels:
+    app: user-frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: user-frontend
+  template:
+    metadata:
+      labels:
+        app: user-frontend
+    spec:
+      containers:
+      - name: user-frontend
+        image: asia-docker.pkg.dev/architect-certification-289902/user-frontend/user-frontend:v1
+        ports:
+        - containerPort: 8501
+        envFrom:
+        - configMapRef:
+            name: app-config
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "50m"
+          limits:
+            memory: "512Mi"
+            cpu: "200m"
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8501
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8501
+          initialDelaySeconds: 10
+          periodSeconds: 5
+
+---
+# ==================================================
+# 10. User Frontend Service
+# ==================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-frontend-service
+  namespace: langgraph-mcp-agents
+  labels:
+    app: user-frontend
+spec:
+  selector:
+    app: user-frontend
+  ports:
+  - port: 8501
+    targetPort: 8501
+    protocol: TCP
+  type: ClusterIP
