@@ -13,7 +13,9 @@ from services.message import MessageService
 from database import init_db
 from core.agent_service import MCPAgentService
 from core.tool_service import MCPToolService
+from core.input_filter import InputFilter, init_filter_db  # 추가
 from routes.messages import router as messages_router
+from filter_api import router as filter_router  # 추가
 
 app = FastAPI(title="LangGraph MCP Agents API", version="2.0.0")
 
@@ -28,6 +30,7 @@ app.add_middleware(
 
 # 라우터 등록
 app.include_router(messages_router, prefix="/messages", tags=["messages"])
+app.include_router(filter_router, prefix="/filters", tags=["filters"])  # 추가
 
 # 서비스 인스턴스
 agent_service = MCPAgentService()
@@ -127,26 +130,51 @@ async def get_default_model_name() -> str:
         return default_model
 
 
+# 입력 필터링 미들웨어 함수
+async def filter_user_input(message: str) -> Dict[str, Any]:
+    """사용자 입력에 대한 필터링 검사"""
+    try:
+        filter_result = InputFilter.contains_sensitive(message)
+        return filter_result
+    except Exception as e:
+        print(f"❌ 입력 필터링 중 오류: {e}")
+        return {
+            "is_sensitive": False,
+            "matched_rules": [],
+            "message": f"필터링 검사 중 오류 발생: {str(e)}"
+        }
+
+
 @app.on_event("startup")
 async def startup_event():
     print("🚀 서버 시작 중...")
     try:
+        # 1. 데이터베이스 초기화
         init_db()
-        print("✅ 데이터베이스 초기화 완료")
+        print("✅ 기본 데이터베이스 초기화 완료")
+        
+        # 2. 필터 데이터베이스 초기화
+        init_filter_db()
+        print("✅ 필터 데이터베이스 초기화 완료")
+        
+        # 3. 필터 규칙 로드
+        InputFilter.load_rules()
+        rules_count = InputFilter.get_rules_count()
+        print(f"✅ 필터 규칙 로드 완료: {rules_count}개 규칙")
 
         # 🔄 개선된 에이전트 초기화 프로세스
         
-        # 1. 먼저 기본 모델명 결정
+        # 4. 먼저 기본 모델명 결정
         default_model = await get_default_model_name()
         
-        # 2. Agent Service 초기화
+        # 5. Agent Service 초기화
         print(f"🤖 Agent Service 초기화 중... (모델: {default_model})")
         agent_init_success = await agent_service.initialize_agent(model_name=default_model)
         
         if agent_init_success:
             print("✅ Agent Service 초기화 완료")
             
-            # 3. Agent Service에서 실제 사용된 모델명 가져오기
+            # 6. Agent Service에서 실제 사용된 모델명 가져오기
             actual_model_name = default_model
             if (hasattr(agent_service, 'model') and 
                 agent_service.model is not None and 
@@ -154,7 +182,7 @@ async def startup_event():
                 actual_model_name = agent_service.model.model_name
                 print(f"📋 Agent Service 실제 사용 모델: {actual_model_name}")
             
-            # 4. Supervisor Service를 같은 모델로 초기화
+            # 7. Supervisor Service를 같은 모델로 초기화
             print(f"👥 Supervisor Service 초기화 중... (모델: {actual_model_name})")
             
             # Supervisor 서비스를 글로벌로 하나만 생성하지 말고,
@@ -291,7 +319,33 @@ async def websocket_endpoint_user(websocket: WebSocket):
                 elif message and not message.startswith("["):
                     print(f"💬 일반 메시지: {message}")
 
-                    # 메시지 저장
+                    # 🔒 입력 필터링 검사
+                    filter_result = await filter_user_input(message)
+                    
+                    if filter_result["is_sensitive"]:
+                        # 민감한 내용 감지 시 사용자에게 알림
+                        warning_message = f"""🚨 민감한 내용이 감지되었습니다.
+
+{filter_result['message']}
+
+매칭된 규칙:
+{chr(10).join([f"- {rule['name']}" for rule in filter_result['matched_rules']])}
+
+메시지 처리가 차단되었습니다."""
+                        
+                        await websocket.send_json({
+                            "type": "response_chunk",
+                            "data": warning_message
+                        })
+                        
+                        await websocket.send_json({
+                            "type": "response_complete"
+                        })
+                        
+                        print(f"🚨 민감한 내용으로 인해 메시지 차단: {len(filter_result['matched_rules'])}개 규칙 매칭")
+                        continue
+
+                    # 메시지 저장 (필터 통과한 경우만)
                     MessageService.create_message(message, "admin")
 
                     # 기존 채팅이 있으면 취소
@@ -374,13 +428,20 @@ async def get_user_status(user=Depends(get_current_user)):
     thread_id = "default"
     supervisor = supervisor_instances.get(thread_id)
 
+    # 필터 상태 정보 추가
+    filter_status = {
+        "rules_count": InputFilter.get_rules_count(),
+        "active": InputFilter.get_rules_count() > 0
+    }
+
     if supervisor:
         status = await supervisor.get_agent_status()
         return {
             "agent_ready": status.get("is_initialized", False),
             "tools_available": status.get("tools_count", 0),
             "hitl_config": status.get("hitl_config", {}),
-            "model_name": status.get("model_name", "Unknown")
+            "model_name": status.get("model_name", "Unknown"),
+            "filter_status": filter_status  # 추가
         }
     else:
         # Supervisor가 없으면 Agent Service 상태 반환
@@ -389,10 +450,9 @@ async def get_user_status(user=Depends(get_current_user)):
             "agent_ready": status["is_initialized"],
             "tools_available": status["tools_count"],
             "hitl_config": {},
-            "model_name": status.get("model_name", "Unknown")
+            "model_name": status.get("model_name", "Unknown"),
+            "filter_status": filter_status  # 추가
         }
-
-
 @app.get("/api/admin/tools")
 async def get_tools(admin=Depends(get_admin_user)):
     """모든 도구 조회"""
@@ -453,10 +513,18 @@ async def get_agent_status(admin=Depends(get_admin_user)):
         except Exception as e:
             supervisor_statuses[thread_id] = {"error": str(e)}
     
+    # 필터 상태 정보 추가
+    filter_status = {
+        "rules_count": InputFilter.get_rules_count(),
+        "active": InputFilter.get_rules_count() > 0,
+        "all_rules": InputFilter.get_all_rules()
+    }
+    
     return {
         "agent_service": agent_status,
         "supervisor_instances": supervisor_statuses,
-        "total_supervisor_instances": len(supervisor_instances)
+        "total_supervisor_instances": len(supervisor_instances),
+        "filter_status": filter_status  # 추가
     }
 
 
@@ -507,6 +575,12 @@ async def get_admin_stats(admin=Depends(get_admin_user)):
     """운영자 통계"""
     tools = tool_service.get_all_tools()
     agent_status = await agent_service.get_agent_status()
+    
+    # 필터 통계 추가
+    filter_stats = {
+        "total_rules": InputFilter.get_rules_count(),
+        "active": InputFilter.get_rules_count() > 0
+    }
 
     return {
         "active_tools": len(tools),
@@ -514,6 +588,7 @@ async def get_admin_stats(admin=Depends(get_admin_user)):
         "model_name": agent_status.get("model_name", "None"),
         "supervisor_instances": len(supervisor_instances),
         "active_websockets": len(active_websockets),
+        "filter_stats": filter_stats,  # 추가
         "total_conversations": 0,  # TODO: 실제 대화 수 계산
         "daily_users": 1  # TODO: 실제 사용자 수 계산
     }
