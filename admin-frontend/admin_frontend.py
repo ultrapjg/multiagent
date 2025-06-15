@@ -6,6 +6,7 @@ import re
 from datetime import datetime
 import pandas as pd
 import os
+import time
 
 BACKEND_URL=os.getenv("BACKEND_URL", "http://backend:8000")
 
@@ -156,6 +157,330 @@ class AdminAPIClient:
         except Exception as e:
             st.error(f"필터 규칙 리로드 실패: {e}")
             return False
+
+    # API 키 관련 메서드 추가
+    def get_api_keys(self, include_inactive: bool = False) -> List[Dict]:
+        """API 키 목록 조회"""
+        try:
+            response = requests.get(
+                f"{self.base_url}/api/admin/api-keys",
+                headers=self.headers,
+                params={"include_inactive": include_inactive}
+            )
+            response.raise_for_status()
+            return response.json().get("api_keys", [])
+        except Exception as e:
+            st.error(f"API 키 조회 실패: {e}")
+            return []
+    
+    def create_api_key(self, name: str, description: str = "", expires_days: int = None) -> Dict:
+        """API 키 생성"""
+        try:
+            data = {
+                "name": name,
+                "description": description,
+                "expires_days": expires_days
+            }
+            response = requests.post(
+                f"{self.base_url}/api/admin/api-keys",
+                headers=self.headers,
+                json=data
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            st.error(f"API 키 생성 실패: {e}")
+            return {}
+    
+    def update_api_key(self, key_id: int, name: str = None, description: str = None, is_active: bool = None) -> bool:
+        """API 키 업데이트"""
+        try:
+            data = {}
+            if name is not None:
+                data["name"] = name
+            if description is not None:
+                data["description"] = description
+            if is_active is not None:
+                data["is_active"] = is_active
+            
+            response = requests.put(
+                f"{self.base_url}/api/admin/api-keys/{key_id}",
+                headers=self.headers,
+                json=data
+            )
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            st.error(f"API 키 업데이트 실패: {e}")
+            return False
+    
+    def delete_api_key(self, key_id: int, soft_delete: bool = True) -> bool:
+        """API 키 삭제"""
+        try:
+            response = requests.delete(
+                f"{self.base_url}/api/admin/api-keys/{key_id}",
+                headers=self.headers,
+                params={"soft_delete": soft_delete}
+            )
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            st.error(f"API 키 삭제 실패: {e}")
+            return False
+    
+    def get_api_key_stats(self) -> Dict:
+        """API 키 통계 조회"""
+        try:
+            response = requests.get(f"{self.base_url}/api/admin/api-keys/stats", headers=self.headers)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            st.error(f"API 키 통계 조회 실패: {e}")
+            return {}
+
+
+def render_api_key_management_tab(api_client: AdminAPIClient):
+    """API 키 관리 탭 렌더링"""
+    st.subheader("🔑 API 키 관리")
+    
+    # API 키 통계 표시
+    col1, col2, col3, col4 = st.columns(4)
+    
+    api_key_stats = api_client.get_api_key_stats()
+    
+    with col1:
+        st.metric(
+            label="🔑 전체 API 키",
+            value=api_key_stats.get("total_keys", 0)
+        )
+    
+    with col2:
+        st.metric(
+            label="✅ 활성 API 키",
+            value=api_key_stats.get("active_keys", 0)
+        )
+    
+    with col3:
+        st.metric(
+            label="⏰ 만료된 키",
+            value=api_key_stats.get("expired_keys", 0)
+        )
+    
+    with col4:
+        st.metric(
+            label="📊 최근 사용",
+            value=api_key_stats.get("recent_used_keys", 0)
+        )
+    
+    st.markdown("---")
+    
+    # API 키 목록과 생성 섹션
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.write("**현재 API 키 목록:**")
+        
+        # 필터 옵션
+        col_filter1, col_filter2 = st.columns(2)
+        with col_filter1:
+            include_inactive = st.checkbox("비활성화된 키 포함", value=False)
+        with col_filter2:
+            if st.button("🔄 새로고침", key="refresh_api_keys"):
+                st.rerun()
+        
+        api_keys = api_client.get_api_keys(include_inactive=include_inactive)
+        
+        if api_keys:
+            for api_key in api_keys:
+                # 상태에 따른 색상 결정
+                if not api_key['is_active']:
+                    status_color = "🔴"
+                    status_text = "비활성화"
+                elif api_key.get('is_expired', False):
+                    status_color = "🟠"
+                    status_text = "만료됨"
+                else:
+                    status_color = "🟢"
+                    status_text = "활성"
+                
+                with st.expander(f"{status_color} {api_key['name']} ({status_text})"):
+                    col_info, col_action = st.columns([3, 1])
+                    
+                    with col_info:
+                        st.write(f"**ID:** {api_key['id']}")
+                        st.write(f"**키 미리보기:** {api_key['key_preview']}")
+                        st.write(f"**설명:** {api_key['description'] or '설명 없음'}")
+                        st.write(f"**생성일:** {api_key['created_at']}")
+                        
+                        if api_key['expires_at']:
+                            st.write(f"**만료일:** {api_key['expires_at']}")
+                        else:
+                            st.write("**만료일:** 만료되지 않음")
+                        
+                        if api_key['last_used_at']:
+                            st.write(f"**마지막 사용:** {api_key['last_used_at']}")
+                        else:
+                            st.write("**마지막 사용:** 사용 안됨")
+                    
+                    with col_action:
+                        # 활성화/비활성화 토글
+                        if api_key['is_active']:
+                            if st.button("⏸️ 비활성화", key=f"deactivate_{api_key['id']}"):
+                                if api_client.update_api_key(api_key['id'], is_active=False):
+                                    st.success("API 키가 비활성화되었습니다!")
+                                    st.rerun()
+                        else:
+                            if st.button("▶️ 활성화", key=f"activate_{api_key['id']}"):
+                                if api_client.update_api_key(api_key['id'], is_active=True):
+                                    st.success("API 키가 활성화되었습니다!")
+                                    st.rerun()
+                        
+                        # 삭제 버튼
+                        if st.button("🗑️ 삭제", key=f"delete_api_key_{api_key['id']}"):
+                            if api_client.delete_api_key(api_key['id'], soft_delete=True):
+                                st.success("API 키가 삭제되었습니다!")
+                                st.rerun()
+                        
+                        # 수정 버튼
+                        if st.button("✏️ 수정", key=f"edit_api_key_{api_key['id']}"):
+                            st.session_state[f"editing_key_{api_key['id']}"] = True
+                        
+                        # 수정 폼 (세션 상태에 따라 표시)
+                        if st.session_state.get(f"editing_key_{api_key['id']}", False):
+                            st.write("**수정:**")
+                            new_name = st.text_input(
+                                "이름",
+                                value=api_key['name'],
+                                key=f"edit_name_{api_key['id']}"
+                            )
+                            new_desc = st.text_area(
+                                "설명",
+                                value=api_key['description'],
+                                key=f"edit_desc_{api_key['id']}"
+                            )
+                            
+                            col_save, col_cancel = st.columns(2)
+                            with col_save:
+                                if st.button("💾 저장", key=f"save_{api_key['id']}"):
+                                    if api_client.update_api_key(
+                                        api_key['id'], 
+                                        name=new_name, 
+                                        description=new_desc
+                                    ):
+                                        st.success("API 키가 수정되었습니다!")
+                                        del st.session_state[f"editing_key_{api_key['id']}"]
+                                        st.rerun()
+                            
+                            with col_cancel:
+                                if st.button("❌ 취소", key=f"cancel_{api_key['id']}"):
+                                    del st.session_state[f"editing_key_{api_key['id']}"]
+                                    st.rerun()
+        else:
+            st.info("등록된 API 키가 없습니다.")
+    
+    with col2:
+        st.write("**새 API 키 생성:**")
+        
+        with st.form("create_api_key_form"):
+            api_key_name = st.text_input(
+                "API 키 이름 *",
+                placeholder="예: 프론트엔드 앱"
+            )
+            
+            api_key_description = st.text_area(
+                "설명",
+                placeholder="이 API 키의 용도를 설명하세요...",
+                height=100
+            )
+            
+            # 만료 설정
+            expires_option = st.selectbox(
+                "만료 설정",
+                ["만료되지 않음", "30일", "90일", "180일", "365일", "사용자 정의"]
+            )
+            
+            expires_days = None
+            if expires_option == "30일":
+                expires_days = 30
+            elif expires_option == "90일":
+                expires_days = 90
+            elif expires_option == "180일":
+                expires_days = 180
+            elif expires_option == "365일":
+                expires_days = 365
+            elif expires_option == "사용자 정의":
+                expires_days = st.number_input(
+                    "만료일 (일 단위)",
+                    min_value=1,
+                    max_value=3650,
+                    value=30
+                )
+            
+            # 보안 경고
+            st.warning("⚠️ **보안 주의사항**\n- API 키는 생성 시에만 표시됩니다\n- 안전한 곳에 보관하세요\n- 정기적으로 키를 교체하세요")
+            
+            submitted = st.form_submit_button("🔑 API 키 생성", use_container_width=True)
+            
+            if submitted and api_key_name:
+                result = api_client.create_api_key(
+                    name=api_key_name,
+                    description=api_key_description,
+                    expires_days=expires_days
+                )
+                
+                if result and 'api_key' in result:
+                    st.success("✅ API 키가 성공적으로 생성되었습니다!")
+                    
+                    # 생성된 API 키 표시 (중요!)
+                    st.markdown("### 🔑 생성된 API 키")
+                    st.code(result['api_key'], language=None)
+                    st.error("⚠️ **중요**: 이 키는 다시 표시되지 않습니다. 지금 복사하여 안전한 곳에 보관하세요!")
+                    
+                    # 키 정보 표시
+                    st.json({
+                        "id": result['id'],
+                        "name": result['name'],
+                        "description": result['description'],
+                        "created_at": result['created_at'],
+                        "expires_at": result['expires_at']
+                    })
+                    
+                    time.sleep(3)  # 3초 후 새로고침
+                    st.rerun()
+            elif submitted:
+                st.error("API 키 이름을 입력해주세요.")
+    
+    # 빠른 액션 섹션
+    st.markdown("---")
+    st.subheader("🚀 빠른 액션")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("🔄 모든 키 새로고침", use_container_width=True):
+            st.rerun()
+    
+    with col2:
+        if st.button("⚠️ 만료된 키 정리", use_container_width=True):
+            # 만료된 키들을 비활성화
+            api_keys = api_client.get_api_keys(include_inactive=True)
+            expired_count = 0
+            for key in api_keys:
+                if key.get('is_expired', False) and key['is_active']:
+                    if api_client.update_api_key(key['id'], is_active=False):
+                        expired_count += 1
+            
+            if expired_count > 0:
+                st.success(f"✅ {expired_count}개의 만료된 키를 비활성화했습니다!")
+                st.rerun()
+            else:
+                st.info("정리할 만료된 키가 없습니다.")
+    
+    with col3:
+        if st.button("📊 사용 통계 보기", use_container_width=True):
+            stats = api_client.get_api_key_stats()
+            if stats:
+                st.json(stats)
 
 
 def check_admin_login():
@@ -387,10 +712,11 @@ def main():
     api_client = AdminAPIClient(BACKEND_URL)
     
     # 탭 생성 - 필터 관리 탭 추가
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "📊 대시보드", 
         "🔧 도구 관리", 
         "🛡️ 필터 관리",  # 새로 추가
+        "🔑 API 키 관리",  # 새로 추가
         "🤖 에이전트 관리", 
         "📈 모니터링", 
         "📋 사용자 요청 조회"
@@ -588,11 +914,17 @@ def main():
     # =============================================================================
     with tab3:
         render_filter_management_tab(api_client)
+
+    # =============================================================================
+    # API 키 관리 탭 (새로 추가)
+    # =============================================================================
+    with tab4:
+        render_api_key_management_tab(api_client)    
     
     # =============================================================================
     # 에이전트 관리 탭
     # =============================================================================
-    with tab4:
+    with tab5:
         st.subheader("🤖 에이전트 설정")
         
         # 현재 에이전트 상태
@@ -652,7 +984,7 @@ def main():
     # =============================================================================
     # 모니터링 탭
     # =============================================================================
-    with tab5:
+    with tab6:
         st.subheader("📈 실시간 모니터링")
         
         # 자동 새로고침 설정
@@ -719,7 +1051,7 @@ def main():
     # =============================================================================
     # 사용자 요청 조회
     # =============================================================================
-    with tab6:
+    with tab7:
         st.subheader("📋 요청 목록")
 
         if st.button("🔄 새로고침", key="main_refresh"):

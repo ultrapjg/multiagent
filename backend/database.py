@@ -103,6 +103,36 @@ def init_db():
                     EXECUTE FUNCTION update_updated_at_column();
             ''')
 
+                        # API 키 테이블 생성
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS api_keys (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL,
+                    key_hash VARCHAR(64) NOT NULL UNIQUE,
+                    description TEXT DEFAULT '',
+                    is_active BOOLEAN DEFAULT true,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    expires_at TIMESTAMP NULL,
+                    last_used_at TIMESTAMP NULL
+                )
+            ''')
+            
+            # 인덱스 생성
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_api_keys_hash 
+                ON api_keys(key_hash)
+            ''')
+            
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_api_keys_active 
+                ON api_keys(is_active)
+            ''')
+            
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_api_keys_expires 
+                ON api_keys(expires_at)
+            ''')
+
             conn.commit()
             logger.info("✅ 데이터베이스 초기화 완료 (메시지 + 필터 규칙 테이블)")
             

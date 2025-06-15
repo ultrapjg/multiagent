@@ -18,12 +18,151 @@ st.set_page_config(
     layout="wide"
 )
 
+def verify_api_key(api_key: str) -> Optional[dict]:
+    """API 키 검증"""
+    try:
+        response = requests.post(
+            f"{BACKEND_URL}/api/user/verify-key",
+            json={"api_key": api_key},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            return response.json()
+        elif response.status_code == 401:
+            return None
+        else:
+            st.error(f"서버 오류: {response.status_code}")
+            return None
+    except requests.exceptions.RequestException as e:
+        st.error(f"연결 오류: {e}")
+        return None
+
+
+def check_api_key_authentication():
+    """API 키 인증 확인"""
+    if "api_key_verified" not in st.session_state:
+        st.session_state.api_key_verified = False
+    if "api_key" not in st.session_state:
+        st.session_state.api_key = ""
+    if "api_key_info" not in st.session_state:
+        st.session_state.api_key_info = None
+
+    if not st.session_state.api_key_verified:
+        st.title("🔐 API 키 인증")
+        st.markdown("AI Assistant를 사용하려면 유효한 API 키가 필요합니다.")
+        
+        # API 키 입력 섹션
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            with st.container():
+                st.markdown("### API 키 입력")
+                
+                # API 키 입력 폼
+                with st.form("api_key_form"):
+                    api_key_input = st.text_input(
+                        "API 키",
+                        type="password",
+                        placeholder="ak_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                        help="관리자로부터 받은 API 키를 입력하세요"
+                    )
+                    
+                    col_submit, col_demo = st.columns(2)
+                    
+                    with col_submit:
+                        submit_button = st.form_submit_button(
+                            "🔑 인증하기",
+                            use_container_width=True,
+                            type="primary"
+                        )
+                    
+                    with col_demo:
+                        demo_button = st.form_submit_button(
+                            "🎮 데모 모드",
+                            use_container_width=True,
+                            help="데모용 토큰 사용 (개발/테스트용)"
+                        )
+                    
+                    if submit_button and api_key_input:
+                        with st.spinner("API 키 검증 중..."):
+                            verification_result = verify_api_key(api_key_input)
+                            
+                            if verification_result:
+                                st.session_state.api_key = api_key_input
+                                st.session_state.api_key_verified = True
+                                st.session_state.api_key_info = verification_result.get("api_key_info", {})
+                                
+                                st.success("✅ API 키 인증 성공!")
+                                st.info(f"**API 키 이름:** {st.session_state.api_key_info.get('name', 'Unknown')}")
+                                if st.session_state.api_key_info.get('description'):
+                                    st.info(f"**설명:** {st.session_state.api_key_info['description']}")
+                                
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                st.error("❌ 유효하지 않거나 만료된 API 키입니다.")
+                    
+                    elif demo_button:
+                        # 데모 모드 (개발/테스트용)
+                        st.session_state.api_key = "user_token"  # 기존 토큰 사용
+                        st.session_state.api_key_verified = True
+                        st.session_state.api_key_info = {
+                            "name": "데모 모드",
+                            "description": "개발/테스트용 데모 계정"
+                        }
+                        
+                        st.success("✅ 데모 모드로 접속합니다!")
+                        time.sleep(1)
+                        st.rerun()
+                    
+                    elif submit_button and not api_key_input:
+                        st.error("API 키를 입력해주세요.")
+                
+                # 도움말 섹션
+                st.markdown("---")
+                st.markdown("### 📋 도움말")
+                with st.expander("API 키 관련 안내"):
+                    st.markdown("""
+                    **API 키란?**
+                    - AI Assistant 서비스에 접근하기 위한 인증 키입니다
+                    - 각 사용자/애플리케이션마다 고유한 키가 발급됩니다
+                    
+                    **API 키 형식:**
+                    - `ak_` 로 시작하는 44자리 문자열입니다
+                    - 예: `ak_abc123def456ghi789jkl012mno345pqr678stu901`
+                    
+                    **API 키 발급:**
+                    - 시스템 관리자에게 요청하세요
+                    - 관리자 대시보드에서 새 API 키를 생성할 수 있습니다
+                    
+                    **보안 주의사항:**
+                    - API 키는 비밀번호와 같으니 안전하게 보관하세요
+                    - 다른 사람과 공유하지 마세요
+                    - 키가 노출되었다면 즉시 관리자에게 알리세요
+                    """)
+                
+                with st.expander("문제 해결"):
+                    st.markdown("""
+                    **API 키 인증이 실패하는 경우:**
+                    1. API 키를 정확히 입력했는지 확인하세요
+                    2. 키가 만료되지 않았는지 확인하세요
+                    3. 네트워크 연결을 확인하세요
+                    4. 관리자에게 키 상태를 문의하세요
+                    
+                    **데모 모드:**
+                    - 개발/테스트 목적으로만 사용하세요
+                    - 실제 운영 환경에서는 유효한 API 키를 사용하세요
+                    """)
+        
+        return False
+    return True
 
 class HITLWebSocketClient:
     """Human-in-the-Loop 지원 웹소켓 클라이언트"""
 
-    def __init__(self, url: str):
+    def __init__(self, url: str, api_key: str = None):
         self.url = url
+        self.api_key = api_key        
         self.ws = None
         self.is_connected = False
         self.response_buffer = ""
@@ -34,7 +173,12 @@ class HITLWebSocketClient:
     def connect(self):
         """웹소켓 연결"""
         try:
-            self.ws = websocket.create_connection(self.url)
+            # API 키를 URL 파라미터로 추가
+            if self.api_key:
+                connection_url = f"{self.url}?api_key={self.api_key}"
+            else:
+                connection_url = self.url            
+            self.ws = websocket.create_connection(connection_url)
             self.is_connected = True
             return True
         except Exception as e:
@@ -145,16 +289,22 @@ class HITLWebSocketClient:
         self.is_connected = False
 
 
-def send_hitl_approval_to_backend(approval_response: str, thread_id: str = "default"):
+def send_hitl_approval_to_backend(approval_response: str, thread_id: str = "default", api_key: str = None):
     """백엔드로 HITL 승인 응답 전송 (REST API 사용)"""
     try:
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        else:
+            headers["Authorization"] = "Bearer user_token"  # 폴백
+        
         response = requests.post(
             f"{BACKEND_URL}/api/user/hitl/approve",
             json={
                 "approval": approval_response,
                 "thread_id": thread_id
             },
-            headers={"Authorization": "Bearer user_token"},
+            headers=headers,
             timeout=5
         )
 
@@ -230,6 +380,11 @@ def render_hitl_approval_ui(hitl_message: str, approval_details: dict,
     st.markdown("---")
     st.markdown("### 🤚 Human Approval 필요")
 
+    # 현재 사용 중인 API 키 정보 표시
+    api_key_info = st.session_state.get("api_key_info", {})
+    if api_key_info and api_key_info.get("name") != "데모 모드":
+        st.info(f"🔑 API 키: {api_key_info.get('name', 'Unknown')}")
+
     # 메시지 표시
     with st.expander("📋 승인 요청 상세", expanded=True):
         st.markdown(hitl_message)
@@ -303,7 +458,8 @@ def render_hitl_approval_ui(hitl_message: str, approval_details: dict,
             "confidence": approval_details.get("confidence"),
             "tool_name": approval_details.get("tool_name"),
             "keywords": approval_details.get("keywords"),
-            "options": approval_details["options"]
+            "options": approval_details["options"],
+            "api_key_name": api_key_info.get("name", "Unknown")
         })
 
     st.markdown("---")
@@ -311,8 +467,33 @@ def render_hitl_approval_ui(hitl_message: str, approval_details: dict,
 
 
 def main():
+    # API 키 인증 확인
+    if not check_api_key_authentication():
+        return
+        
     st.title("🤖 AI Assistant with Human-in-the-Loop")
     st.markdown("Human-in-the-Loop 기능이 지원되는 LangGraph MCP 에이전트와 대화해보세요!")
+
+    # API 키 정보 표시 및 로그아웃
+    with st.sidebar:
+        st.header("👤 사용자 정보")
+        
+        # API 키 정보 표시
+        api_key_info = st.session_state.get("api_key_info", {})
+        if api_key_info:
+            st.success("✅ 인증됨")
+            st.info(f"**키 이름:** {api_key_info.get('name', 'Unknown')}")
+            if api_key_info.get('description'):
+                st.info(f"**설명:** {api_key_info['description']}")
+        
+        # 로그아웃 버튼
+        if st.button("🚪 로그아웃", use_container_width=True):
+            # 세션 상태 초기화
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.rerun()
+        
+        st.markdown("---")
 
     # HITL 설정 사이드바
     with st.sidebar:
@@ -330,9 +511,13 @@ def main():
 
         # 서버 상태 확인
         try:
+            headers = {}
+            if st.session_state.api_key:
+                headers["Authorization"] = f"Bearer {st.session_state.api_key}"
+
             response = requests.get(
                 f"{BACKEND_URL}/api/user/status",
-                headers={"Authorization": "Bearer user_token"},
+                headers=headers,
                 timeout=5
             )
             if response.status_code == 200:
@@ -340,6 +525,7 @@ def main():
                 st.success("✅ 서버 연결됨")
                 st.info(f"🤖 에이전트: {'준비됨' if status['agent_ready'] else '초기화 중'}")
                 st.info(f"🛠️ 도구: {status['tools_available']}개")
+                st.info(f"🔑 인증: {status.get('auth_type', 'unknown')}")
 
                 # HITL 상태 표시
                 if 'hitl_config' in status:
@@ -523,7 +709,7 @@ def main():
                     st.error("❌ 승인 응답 전송 실패")
             else:
                 # REST API로 전송 (폴백)
-                if send_hitl_approval_to_backend(approval_response, st.session_state.thread_id):
+                if send_hitl_approval_to_backend(approval_response, st.session_state.thread_id, st.session_state.api_key):
                     st.success(f"✅ 승인 응답 완료: {approval_response}")
                     # 상태 초기화
                     st.session_state.waiting_for_approval = False
@@ -547,7 +733,10 @@ def main():
                 full_response = ""
 
                 # 웹소켓 클라이언트 생성 및 연결
-                client = HITLWebSocketClient(f"{BACKEND_WEBSOCKET}/api/user/chat")
+                client = HITLWebSocketClient(
+                    f"{BACKEND_WEBSOCKET}/api/user/chat",
+                    api_key=st.session_state.api_key
+                )
 
                 if client.connect():
                     # HITL 설정을 포함하여 메시지 전송
