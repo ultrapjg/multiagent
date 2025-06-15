@@ -17,6 +17,7 @@ from core.tool_service import MCPToolService
 from core.input_filter import InputFilter, init_filter_db  # 추가
 from routes.messages import router as messages_router
 from routes.api_keys import router as api_keys_router  # 추가
+from routes.mcp_tools import router as mcp_tools_router
 from filter_api import router as filter_router  # 추가
 
 app = FastAPI(title="LangGraph MCP Agents API", version="2.0.0")
@@ -34,6 +35,7 @@ app.add_middleware(
 app.include_router(messages_router, prefix="/messages", tags=["messages"])
 app.include_router(filter_router, prefix="/filters", tags=["filters"])  # 추가
 app.include_router(api_keys_router, prefix="/api", tags=["api_keys"])  # 추가
+app.include_router(mcp_tools_router, prefix="/api", tags=["mcp_tools"])  # 추가
 
 # 서비스 인스턴스
 agent_service = MCPAgentService()
@@ -564,41 +566,110 @@ async def verify_api_key_endpoint(request: dict):
 
 @app.get("/api/admin/tools")
 async def get_tools(admin=Depends(get_admin_user)):
-    """모든 도구 조회"""
-    tools = tool_service.get_all_tools()
-    return {"tools": tools, "count": len(tools)}
+    """모든 도구 조회 - 데이터베이스에서"""
+    try:
+        from services.mcp_tool_service import MCPToolService
+        tools = MCPToolService.get_all_tools(include_inactive=False)
+        
+        # 기존 형식과 호환되도록 변환
+        formatted_tools = []
+        for tool in tools:
+            formatted_tools.append({
+                "id": tool['name'],
+                "name": tool['name'],
+                "description": tool.get('description', ''),
+                "transport": tool.get('transport', 'stdio'),
+                "command": tool.get('command', ''),
+                "args": tool.get('args', []),
+                "url": tool.get('url', ''),
+                "active": tool.get('is_active', True),
+                "config": tool.get('config', {})
+            })
+        
+        return {"tools": formatted_tools, "count": len(formatted_tools)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"도구 조회 실패: {str(e)}")
 
 
 @app.post("/api/admin/tools")
 async def create_tool(tool: ToolConfig, admin=Depends(get_admin_user)):
-    """새 도구 추가"""
-    result = tool_service.add_tool(tool.name, tool.config)
-    if result["success"]:
-        return result
-    else:
-        raise HTTPException(status_code=400, detail=result["message"])
+    """새 도구 추가 - 데이터베이스에"""
+    try:
+        from services.mcp_tool_service import MCPToolService
+        
+        result = MCPToolService.create_tool(
+            name=tool.name,
+            config=tool.config,
+            description=tool.description
+        )
+        
+        return {
+            "success": True,
+            "message": f"도구 '{tool.name}'이 성공적으로 추가되었습니다.",
+            "tool": result
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"도구 추가 실패: {str(e)}")
 
 
 @app.delete("/api/admin/tools/{tool_name}")
 async def delete_tool(tool_name: str, admin=Depends(get_admin_user)):
-    """도구 삭제"""
-    result = tool_service.remove_tool(tool_name)
-    if result["success"]:
-        return result
-    else:
-        raise HTTPException(status_code=404, detail=result["message"])
+    """도구 삭제 - 데이터베이스에서"""
+    try:
+        from services.mcp_tool_service import MCPToolService
+        
+        success = MCPToolService.delete_tool_by_name(tool_name, soft_delete=True)
+        
+        if success:
+            return {
+                "success": True,
+                "message": f"도구 '{tool_name}'이 성공적으로 삭제되었습니다."
+            }
+        else:
+            raise HTTPException(status_code=404, detail=f"도구 '{tool_name}'을 찾을 수 없습니다.")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"도구 삭제 실패: {str(e)}")
+
 
 
 @app.post("/api/admin/tools/apply")
 async def apply_tool_changes(admin=Depends(get_admin_user)):
-    """도구 변경사항 적용 (에이전트 재초기화)"""
+    """도구 변경사항 적용 (에이전트 재초기화) - 데이터베이스 기반"""
     try:
-        # MCP 설정 다시 로드하여 에이전트 재초기화
+        # Agent Service 재초기화
         success = await agent_service.initialize_agent()
-        if success:
-            return {"message": "도구 변경사항이 성공적으로 적용되었습니다."}
-        else:
-            raise HTTPException(status_code=500, detail="에이전트 재초기화 실패")
+        if not success:
+            raise HTTPException(status_code=500, detail="Agent Service 초기화 실패")
+        
+        # 모든 Supervisor 인스턴스도 재초기화
+        updated_supervisors = []
+        failed_supervisors = []
+        
+        for thread_id, supervisor in list(supervisor_instances.items()):
+            try:
+                await supervisor.initialize_agent(
+                    model_name=getattr(agent_service.model, 'model_name', 'claude-3-5-sonnet-latest'),
+                    hitl_enabled=True
+                )
+                updated_supervisors.append(thread_id)
+                print(f"✅ Supervisor 재초기화 완료: {thread_id}")
+            except Exception as e:
+                print(f"❌ Supervisor 재초기화 실패: {thread_id} -> {e}")
+                failed_supervisors.append({"thread_id": thread_id, "error": str(e)})
+                del supervisor_instances[thread_id]
+        
+        return {
+            "message": "도구 변경사항이 성공적으로 적용되었습니다 (데이터베이스 기반)",
+            "agent_service": "재초기화 완료",
+            "updated_supervisors": updated_supervisors,
+            "failed_supervisors": failed_supervisors
+        }
+        
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"적용 실패: {str(e)}")
 
@@ -682,7 +753,9 @@ async def reinitialize_agent(config: AgentConfig, admin=Depends(get_admin_user))
 @app.get("/api/admin/stats")
 async def get_admin_stats(admin=Depends(get_admin_user)):
     """운영자 통계"""
-    tools = tool_service.get_all_tools()
+    # MCP 도구 통계
+    from services.mcp_tool_service import MCPToolService
+    mcp_stats = MCPToolService.get_mcp_tool_stats()
     agent_status = await agent_service.get_agent_status()
     
     # 필터 통계 추가
@@ -695,13 +768,15 @@ async def get_admin_stats(admin=Depends(get_admin_user)):
     api_key_stats = APIKeyService.get_api_key_stats()
 
     return {
-        "active_tools": len(tools),
+        "active_tools": mcp_stats.get("active_tools", 0),
+        "total_tools": mcp_stats.get("total_tools", 0),
         "agent_initialized": agent_status["is_initialized"],
         "model_name": agent_status.get("model_name", "None"),
         "supervisor_instances": len(supervisor_instances),
         "active_websockets": len(active_websockets),
         "filter_stats": filter_stats,  # 추가
         "api_key_stats": api_key_stats,  # 추가
+        "mcp_tool_stats": mcp_stats,  # 추가
         "total_conversations": 0,  # TODO: 실제 대화 수 계산
         "daily_users": 1  # TODO: 실제 사용자 수 계산
     }

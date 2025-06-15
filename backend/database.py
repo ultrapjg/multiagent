@@ -133,6 +133,47 @@ def init_db():
                 ON api_keys(expires_at)
             ''')
 
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS mcp_tools (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL UNIQUE,
+                    description TEXT DEFAULT '',
+                    transport VARCHAR(50) NOT NULL DEFAULT 'stdio',
+                    command TEXT,
+                    args JSON,
+                    url TEXT,
+                    config JSON NOT NULL,
+                    is_active BOOLEAN DEFAULT true,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # MCP 도구 테이블 인덱스 생성
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_mcp_tools_name 
+                ON mcp_tools(name)
+            ''')
+
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_mcp_tools_active 
+                ON mcp_tools(is_active)
+            ''')
+
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_mcp_tools_transport 
+                ON mcp_tools(transport)
+            ''')
+
+            # MCP 도구 테이블 업데이트 시간 자동 갱신을 위한 트리거 적용
+            cursor.execute('''
+                DROP TRIGGER IF EXISTS update_mcp_tools_updated_at ON mcp_tools;
+                CREATE TRIGGER update_mcp_tools_updated_at
+                    BEFORE UPDATE ON mcp_tools
+                    FOR EACH ROW
+                    EXECUTE FUNCTION update_updated_at_column();
+            ''')
+
             conn.commit()
             logger.info("✅ 데이터베이스 초기화 완료 (메시지 + 필터 규칙 테이블)")
             
