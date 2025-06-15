@@ -10,11 +10,13 @@ import logging
 
 from services.supervisor import SupervisorService
 from services.message import MessageService
+from services.api_key_service import APIKeyService  # 추가
 from database import init_db
 from core.agent_service import MCPAgentService
 from core.tool_service import MCPToolService
 from core.input_filter import InputFilter, init_filter_db  # 추가
 from routes.messages import router as messages_router
+from routes.api_keys import router as api_keys_router  # 추가
 from filter_api import router as filter_router  # 추가
 
 app = FastAPI(title="LangGraph MCP Agents API", version="2.0.0")
@@ -31,6 +33,7 @@ app.add_middleware(
 # 라우터 등록
 app.include_router(messages_router, prefix="/messages", tags=["messages"])
 app.include_router(filter_router, prefix="/filters", tags=["filters"])  # 추가
+app.include_router(api_keys_router, prefix="/api", tags=["api_keys"])  # 추가
 
 # 서비스 인스턴스
 agent_service = MCPAgentService()
@@ -46,9 +49,16 @@ security = HTTPBearer()
 
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    if credentials.credentials != "user_token":
-        raise HTTPException(status_code=401, detail="Invalid user credentials")
-    return {"role": "user"}
+    """사용자 인증 - API 키 또는 사용자 토큰"""
+    if credentials.credentials == "user_token":
+        return {"role": "user", "auth_type": "token"}
+    
+    # API 키 검증
+    api_key_info = APIKeyService.validate_api_key(credentials.credentials)
+    if api_key_info:
+        return {"role": "user", "auth_type": "api_key", "api_key_info": api_key_info}
+    
+    raise HTTPException(status_code=401, detail="Invalid user credentials or API key")
 
 
 def get_admin_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -73,6 +83,40 @@ class AgentConfig(BaseModel):
     model_name: str = "claude-3-5-sonnet-latest"
     system_prompt: Optional[str] = None
 
+# WebSocket 인증 함수 추가
+async def authenticate_websocket(websocket: WebSocket) -> Optional[Dict]:
+    """WebSocket 연결 인증"""
+    try:
+        # Authorization 헤더에서 토큰/API 키 추출
+        auth_header = websocket.headers.get("authorization")
+        if not auth_header:
+            # Query parameter에서 API 키 확인
+            api_key = websocket.query_params.get("api_key")
+            if api_key:
+                auth_header = f"Bearer {api_key}"
+        
+        if not auth_header or not auth_header.startswith("Bearer "):
+            return None
+        
+        token = auth_header.split(" ")[1]
+        
+        # 관리자 토큰 확인
+        if token == "admin_token":
+            return {"role": "admin", "auth_type": "token"}
+        
+        # 사용자 토큰 확인
+        if token == "user_token":
+            return {"role": "user", "auth_type": "token"}
+        
+        # API 키 검증
+        api_key_info = APIKeyService.validate_api_key(token)
+        if api_key_info:
+            return {"role": "user", "auth_type": "api_key", "api_key_info": api_key_info}
+        
+        return None
+    except Exception as e:
+        logging.error(f"WebSocket 인증 실패: {e}")
+        return None
 
 # HITL 콜백 함수 생성
 def create_hitl_callback(thread_id: str):
@@ -161,6 +205,13 @@ async def startup_event():
         InputFilter.load_rules()
         rules_count = InputFilter.get_rules_count()
         print(f"✅ 필터 규칙 로드 완료: {rules_count}개 규칙")
+
+        # 4. API 키 서비스 초기화 확인
+        try:
+            api_key_stats = APIKeyService.get_api_key_stats()
+            print(f"✅ API 키 서비스 초기화 완료: {api_key_stats['total_keys']}개 키 등록됨")
+        except Exception as e:
+            print(f"⚠️ API 키 서비스 초기화 중 오류: {e}")
 
         # 🔄 개선된 에이전트 초기화 프로세스
         
@@ -260,11 +311,24 @@ async def get_or_create_supervisor(thread_id: str) -> SupervisorService:
 
 @app.websocket("/api/user/chat")
 async def websocket_endpoint_user(websocket: WebSocket):
+    # 인증 확인
+    auth_info = await authenticate_websocket(websocket)
+    if not auth_info:
+        await websocket.close(code=1008, reason="Authentication required")
+        return
+
     await websocket.accept()
     thread_id = "default"
 
     try:
         active_websockets[thread_id] = websocket
+
+        # 인증 정보 로깅
+        if auth_info["auth_type"] == "api_key":
+            api_key_name = auth_info["api_key_info"]["name"]
+            logging.info(f"WebSocket 연결: API 키 '{api_key_name}' 사용")
+        else:
+            logging.info(f"WebSocket 연결: {auth_info['auth_type']} 사용")
 
         # 🔄 개선된 Supervisor 초기화
         supervisor = await get_or_create_supervisor(thread_id)
@@ -345,8 +409,11 @@ async def websocket_endpoint_user(websocket: WebSocket):
                         print(f"🚨 민감한 내용으로 인해 메시지 차단: {len(filter_result['matched_rules'])}개 규칙 매칭")
                         continue
 
-                    # 메시지 저장 (필터 통과한 경우만)
-                    MessageService.create_message(message, "admin")
+                    # 메시지 저장 (필터 통과한 경우만) - 인증 정보에 따라 작성자 설정
+                    if auth_info["auth_type"] == "api_key":
+                        author = f"API:{auth_info['api_key_info']['name']}"
+                    else:
+                        author = "admin"
 
                     # 기존 채팅이 있으면 취소
                     if chat_task and not chat_task.done():
@@ -434,6 +501,16 @@ async def get_user_status(user=Depends(get_current_user)):
         "active": InputFilter.get_rules_count() > 0
     }
 
+    # API 키 정보 추가
+    api_key_info = None
+    if user.get("auth_type") == "api_key":
+        api_key_data = user.get("api_key_info", {})
+        api_key_info = {
+            "name": api_key_data.get("name"),
+            "description": api_key_data.get("description"),
+            "created_at": api_key_data.get("created_at")
+        }
+
     if supervisor:
         status = await supervisor.get_agent_status()
         return {
@@ -441,7 +518,9 @@ async def get_user_status(user=Depends(get_current_user)):
             "tools_available": status.get("tools_count", 0),
             "hitl_config": status.get("hitl_config", {}),
             "model_name": status.get("model_name", "Unknown"),
-            "filter_status": filter_status  # 추가
+            "filter_status": filter_status,
+            "auth_type": user.get("auth_type"),
+            "api_key_info": api_key_info
         }
     else:
         # Supervisor가 없으면 Agent Service 상태 반환
@@ -451,8 +530,38 @@ async def get_user_status(user=Depends(get_current_user)):
             "tools_available": status["tools_count"],
             "hitl_config": {},
             "model_name": status.get("model_name", "Unknown"),
-            "filter_status": filter_status  # 추가
+            "filter_status": filter_status,
+            "auth_type": user.get("auth_type"),
+            "api_key_info": api_key_info            
         }
+
+# API 키 검증 전용 엔드포인트 추가
+@app.post("/api/user/verify-key")
+async def verify_api_key_endpoint(request: dict):
+    """API 키 검증 엔드포인트"""
+    try:
+        api_key = request.get("api_key")
+        if not api_key:
+            raise HTTPException(status_code=400, detail="API 키가 필요합니다")
+        
+        api_key_info = APIKeyService.validate_api_key(api_key)
+        if not api_key_info:
+            raise HTTPException(status_code=401, detail="유효하지 않거나 만료된 API 키입니다")
+        
+        return {
+            "status": "valid",
+            "message": "API 키가 유효합니다",
+            "api_key_info": {
+                "name": api_key_info["name"],
+                "description": api_key_info["description"],
+                "created_at": api_key_info["created_at"]
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"API 키 검증 실패: {str(e)}")   
+
 @app.get("/api/admin/tools")
 async def get_tools(admin=Depends(get_admin_user)):
     """모든 도구 조회"""
@@ -582,6 +691,9 @@ async def get_admin_stats(admin=Depends(get_admin_user)):
         "active": InputFilter.get_rules_count() > 0
     }
 
+    # API 키 통계 추가
+    api_key_stats = APIKeyService.get_api_key_stats()
+
     return {
         "active_tools": len(tools),
         "agent_initialized": agent_status["is_initialized"],
@@ -589,6 +701,7 @@ async def get_admin_stats(admin=Depends(get_admin_user)):
         "supervisor_instances": len(supervisor_instances),
         "active_websockets": len(active_websockets),
         "filter_stats": filter_stats,  # 추가
+        "api_key_stats": api_key_stats,  # 추가
         "total_conversations": 0,  # TODO: 실제 대화 수 계산
         "daily_users": 1  # TODO: 실제 사용자 수 계산
     }
