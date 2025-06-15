@@ -417,6 +417,9 @@ async def websocket_endpoint_user(websocket: WebSocket):
                     else:
                         author = "admin"
 
+                    # 메시지 저장
+                    MessageService.create_message(message, "admin")
+                    
                     # 기존 채팅이 있으면 취소
                     if chat_task and not chat_task.done():
                         chat_task.cancel()
