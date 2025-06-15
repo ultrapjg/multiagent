@@ -1,9 +1,8 @@
-
 import streamlit as st
 import requests
 import json
 from typing import Dict, List, Any
-
+import re
 from datetime import datetime
 import pandas as pd
 import os
@@ -95,6 +94,70 @@ class AdminAPIClient:
             st.error(f"에이전트 재초기화 실패: {e}")
             return False
 
+    # 필터 관련 메서드 추가
+    def get_filters(self) -> List[Dict]:
+        """필터 규칙 목록 조회"""
+        try:
+            response = requests.get(f"{self.base_url}/filters/filters")
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            st.error(f"필터 규칙 조회 실패: {e}")
+            return []
+    
+    def add_filter(self, name: str, pattern: str) -> bool:
+        """필터 규칙 추가"""
+        try:
+            data = {"name": name, "pattern": pattern}
+            response = requests.post(f"{self.base_url}/filters/filters", json=data)
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            st.error(f"필터 규칙 추가 실패: {e}")
+            return False
+    
+    def delete_filter(self, rule_id: int) -> bool:
+        """필터 규칙 삭제"""
+        try:
+            response = requests.delete(f"{self.base_url}/filters/filters/{rule_id}")
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            st.error(f"필터 규칙 삭제 실패: {e}")
+            return False
+    
+    def test_filter(self, text: str) -> Dict:
+        """필터 테스트"""
+        try:
+            data = {"text": text}
+            response = requests.post(f"{self.base_url}/filters/filters/test", json=data)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            st.error(f"필터 테스트 실패: {e}")
+            return {}
+    
+    def get_filter_stats(self) -> Dict:
+        """필터 통계 조회"""
+        try:
+            response = requests.get(f"{self.base_url}/filters/filters/stats")
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            st.error(f"필터 통계 조회 실패: {e}")
+            return {}
+    
+    def reload_filters(self) -> bool:
+        """필터 규칙 리로드"""
+        try:
+            response = requests.post(f"{self.base_url}/filters/filters/reload")
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            st.error(f"필터 규칙 리로드 실패: {e}")
+            return False
+
+
 def check_admin_login():
     """관리자 로그인 확인"""
     if "admin_logged_in" not in st.session_state:
@@ -119,6 +182,192 @@ def check_admin_login():
         return False
     return True
 
+
+def render_filter_management_tab(api_client: AdminAPIClient):
+    """필터 관리 탭 렌더링"""
+    st.subheader("🛡️ 입력 필터 관리")
+    
+    # 필터 통계 표시
+    col1, col2, col3, col4 = st.columns(4)
+    
+    filter_stats = api_client.get_filter_stats()
+    
+    with col1:
+        st.metric(
+            label="🛡️ 활성 필터 규칙",
+            value=filter_stats.get("total_rules", 0)
+        )
+    
+    with col2:
+        st.metric(
+            label="📊 필터 상태",
+            value="활성화" if filter_stats.get("filter_status") == "active" else "비활성화"
+        )
+    
+    with col3:
+        if st.button("🔄 필터 리로드", use_container_width=True):
+            if api_client.reload_filters():
+                st.success("필터 규칙이 리로드되었습니다!")
+                st.rerun()
+    
+    with col4:
+        if st.button("📊 통계 새로고침", use_container_width=True):
+            st.rerun()
+    
+    st.markdown("---")
+    
+    # 필터 규칙 목록과 추가 섹션
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.write("**현재 필터 규칙:**")
+        filters = api_client.get_filters()
+        
+        if filters:
+            for filter_rule in filters:
+                with st.expander(f"🛡️ {filter_rule['name']}"):
+                    col_info, col_action = st.columns([3, 1])
+                    
+                    with col_info:
+                        st.write(f"**규칙 ID:** {filter_rule.get('id', 'N/A')}")
+                        st.write(f"**패턴:** `{filter_rule['pattern']}`")
+                        
+                        if filter_rule.get('created_at'):
+                            created_at = datetime.fromisoformat(filter_rule['created_at'].replace('Z', '+00:00'))
+                            st.write(f"**생성일:** {created_at.strftime('%Y-%m-%d %H:%M:%S')}")
+                        
+                        # 패턴 유효성 검사
+                        try:
+                            re.compile(filter_rule['pattern'])
+                            st.success("✅ 유효한 정규식 패턴")
+                        except re.error as e:
+                            st.error(f"❌ 잘못된 정규식 패턴: {e}")
+                    
+                    with col_action:
+                        if st.button("🗑️ 삭제", key=f"delete_filter_{filter_rule.get('id')}"):
+                            if api_client.delete_filter(filter_rule.get('id')):
+                                st.success(f"필터 규칙 '{filter_rule['name']}'이 삭제되었습니다!")
+                                st.rerun()
+        else:
+            st.info("등록된 필터 규칙이 없습니다.")
+    
+    with col2:
+        st.write("**새 필터 규칙 추가:**")
+        
+        with st.form("add_filter_form"):
+            filter_name = st.text_input(
+                "규칙 이름",
+                placeholder="예: 이메일 패턴"
+            )
+            
+            filter_pattern = st.text_area(
+                "정규식 패턴",
+                placeholder="예: [a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}",
+                height=100
+            )
+            
+            # 일반적인 패턴 예시
+            st.write("**일반적인 패턴 예시:**")
+            pattern_examples = {
+                "이메일": r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
+                "전화번호": r"01[0-9]-\d{3,4}-\d{4}",
+                "주민등록번호": r"\d{6}-[1-4]\d{6}",
+                "신용카드": r"\d{4}-\d{4}-\d{4}-\d{4}",
+                "욕설": r"(바보|멍청이|쓰레기)",
+                "URL": r"https?://[^\s]+",
+                "IP 주소": r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b"
+            }
+            
+            selected_example = st.selectbox(
+                "패턴 예시 선택:",
+                ["직접 입력"] + list(pattern_examples.keys())
+            )
+            
+            if selected_example != "직접 입력":
+                st.code(pattern_examples[selected_example])
+                if st.button("패턴 적용", key="apply_pattern"):
+                    st.session_state.temp_pattern = pattern_examples[selected_example]
+                    st.rerun()
+            
+            # 세션 상태에서 임시 패턴 적용
+            if hasattr(st.session_state, 'temp_pattern'):
+                filter_pattern = st.session_state.temp_pattern
+                del st.session_state.temp_pattern
+            
+            # 패턴 유효성 실시간 검사
+            if filter_pattern:
+                try:
+                    re.compile(filter_pattern)
+                    st.success("✅ 유효한 정규식 패턴")
+                except re.error as e:
+                    st.error(f"❌ 잘못된 정규식: {e}")
+            
+            submitted = st.form_submit_button("필터 추가", use_container_width=True)
+            
+            if submitted and filter_name and filter_pattern:
+                try:
+                    # 패턴 유효성 최종 검사
+                    re.compile(filter_pattern)
+                    
+                    if api_client.add_filter(filter_name, filter_pattern):
+                        st.success("필터 규칙이 성공적으로 추가되었습니다!")
+                        st.rerun()
+                except re.error as e:
+                    st.error(f"정규식 패턴 오류: {e}")
+                except Exception as e:
+                    st.error(f"필터 추가 실패: {e}")
+    
+    # 필터 테스트 섹션
+    st.markdown("---")
+    st.subheader("🧪 필터 테스트")
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        test_text = st.text_area(
+            "테스트할 텍스트를 입력하세요:",
+            placeholder="예: 제 이메일은 test@example.com 입니다.",
+            height=100
+        )
+        
+        if st.button("🧪 필터 테스트 실행", use_container_width=True):
+            if test_text:
+                test_result = api_client.test_filter(test_text)
+                
+                if test_result:
+                    if test_result.get("is_sensitive"):
+                        st.error("🚨 민감한 내용이 감지되었습니다!")
+                        st.write(f"**메시지:** {test_result.get('message', '')}")
+                        
+                        matched_rules = test_result.get("matched_rules", [])
+                        if matched_rules:
+                            st.write("**매칭된 규칙들:**")
+                            for rule in matched_rules:
+                                st.write(f"- **{rule['name']}** (ID: {rule['id']})")
+                                st.code(rule['pattern'])
+                    else:
+                        st.success("✅ 민감한 내용이 감지되지 않았습니다.")
+                        st.write(f"**메시지:** {test_result.get('message', '')}")
+            else:
+                st.warning("테스트할 텍스트를 입력해주세요.")
+    
+    with col2:
+        st.write("**테스트 예시:**")
+        test_examples = [
+            "안녕하세요!",
+            "제 이메일은 test@example.com 입니다.",
+            "전화번호는 010-1234-5678 입니다.",
+            "주민등록번호는 123456-1234567 입니다.",
+            "이 바보야!",
+            "https://example.com 에 방문해보세요."
+        ]
+        
+        for i, example in enumerate(test_examples):
+            if st.button(f"예시 {i+1}", key=f"test_example_{i}", use_container_width=True):
+                st.session_state.test_text = example
+                st.rerun()
+
+
 def main():
     if not check_admin_login():
         return
@@ -137,8 +386,15 @@ def main():
     # API 클라이언트 초기화
     api_client = AdminAPIClient(BACKEND_URL)
     
-    # 탭 생성
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 대시보드", "🔧 도구 관리", "🤖 에이전트 관리", "📈 모니터링", "📋 사용자 요청 조회"])
+    # 탭 생성 - 필터 관리 탭 추가
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "📊 대시보드", 
+        "🔧 도구 관리", 
+        "🛡️ 필터 관리",  # 새로 추가
+        "🤖 에이전트 관리", 
+        "📈 모니터링", 
+        "📋 사용자 요청 조회"
+    ])
     
     # =============================================================================
     # 대시보드 탭
@@ -149,7 +405,7 @@ def main():
         # 통계 정보
         stats = api_client.get_stats()
         
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         
         with col1:
             st.metric(
@@ -165,11 +421,17 @@ def main():
         
         with col3:
             st.metric(
+                label="🛡️ 필터 규칙",
+                value=stats.get("filter_stats", {}).get("total_rules", 0)
+            )
+        
+        with col4:
+            st.metric(
                 label="💬 총 대화",
                 value=stats.get("total_conversations", 0)
             )
         
-        with col4:
+        with col5:
             st.metric(
                 label="👥 일일 사용자",
                 value=stats.get("daily_users", 0)
@@ -185,10 +447,16 @@ def main():
         with col1:
             st.subheader("🤖 에이전트 상태")
             if agent_status:
-                st.write(f"**초기화 여부:** {'✅' if agent_status.get('is_initialized') else '❌'}")
-                st.write(f"**모델:** {agent_status.get('model_name', 'Unknown')}")
-                st.write(f"**도구 수:** {agent_status.get('tools_count', 0)}개")
-                st.write(f"**MCP 클라이언트:** {'✅' if agent_status.get('mcp_client_active') else '❌'}")
+                agent_service_status = agent_status.get("agent_service", {})
+                st.write(f"**초기화 여부:** {'✅' if agent_service_status.get('is_initialized') else '❌'}")
+                st.write(f"**모델:** {agent_service_status.get('model_name', 'Unknown')}")
+                st.write(f"**도구 수:** {agent_service_status.get('tools_count', 0)}개")
+                st.write(f"**MCP 클라이언트:** {'✅' if agent_service_status.get('mcp_client_active') else '❌'}")
+                
+                # 필터 상태 정보 추가
+                filter_status = agent_status.get("filter_status", {})
+                st.write(f"**필터 규칙:** {filter_status.get('rules_count', 0)}개")
+                st.write(f"**필터 활성화:** {'✅' if filter_status.get('active') else '❌'}")
             else:
                 st.error("에이전트 상태를 가져올 수 없습니다.")
         
@@ -197,6 +465,11 @@ def main():
             if st.button("🔄 에이전트 재시작", use_container_width=True):
                 if api_client.apply_changes():
                     st.success("에이전트가 재시작되었습니다!")
+                    st.rerun()
+            
+            if st.button("🛡️ 필터 리로드", use_container_width=True):
+                if api_client.reload_filters():
+                    st.success("필터 규칙이 리로드되었습니다!")
                     st.rerun()
             
             if st.button("📊 상태 새로고침", use_container_width=True):
@@ -210,7 +483,6 @@ def main():
         
         # 현재 도구 목록
         tools = api_client.get_tools()
-        print(tools)
         col1, col2 = st.columns([2, 1])
         
         with col1:
@@ -227,10 +499,6 @@ def main():
                                 st.write(f"**Args:** {', '.join(tool['args'])}")
                             if tool.get('url'):
                                 st.write(f"**URL:** {tool['url']}")
-                            
-                            # JSON 설정 표시
-                            # with st.expander("JSON 설정 보기"):
-                            #     st.json(tool.get('config', {}))
                         
                         with col_action:
                             if st.button("❌ 삭제", key=f"delete_{tool['name']}"):
@@ -316,9 +584,15 @@ def main():
                         st.rerun()
     
     # =============================================================================
-    # 에이전트 관리 탭
+    # 필터 관리 탭 (새로 추가)
     # =============================================================================
     with tab3:
+        render_filter_management_tab(api_client)
+    
+    # =============================================================================
+    # 에이전트 관리 탭
+    # =============================================================================
+    with tab4:
         st.subheader("🤖 에이전트 설정")
         
         # 현재 에이전트 상태
@@ -378,7 +652,7 @@ def main():
     # =============================================================================
     # 모니터링 탭
     # =============================================================================
-    with tab4:
+    with tab5:
         st.subheader("📈 실시간 모니터링")
         
         # 자동 새로고침 설정
@@ -403,16 +677,34 @@ def main():
             st.write("**에이전트 메트릭:**")
             agent_status = api_client.get_agent_status()
             if agent_status:
+                agent_service_status = agent_status.get("agent_service", {})
                 # 간단한 메트릭 표시
                 metrics = {
-                    "초기화 상태": "✅ 완료" if agent_status.get('is_initialized') else "❌ 실패",
-                    "사용 가능한 도구": f"{agent_status.get('tools_count', 0)}개",
-                    "모델": agent_status.get('model_name', 'Unknown'),
-                    "MCP 연결": "✅ 활성" if agent_status.get('mcp_client_active') else "❌ 비활성"
+                    "초기화 상태": "✅ 완료" if agent_service_status.get('is_initialized') else "❌ 실패",
+                    "사용 가능한 도구": f"{agent_service_status.get('tools_count', 0)}개",
+                    "모델": agent_service_status.get('model_name', 'Unknown'),
+                    "MCP 연결": "✅ 활성" if agent_service_status.get('mcp_client_active') else "❌ 비활성",
+                    "필터 규칙": f"{agent_status.get('filter_status', {}).get('rules_count', 0)}개"
                 }
                 
                 for key, value in metrics.items():
                     st.write(f"**{key}:** {value}")
+        
+        # 필터 상태 모니터링 추가
+        st.markdown("---")
+        st.subheader("🛡️ 필터 시스템 모니터링")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("**필터 통계:**")
+            filter_stats = api_client.get_filter_stats()
+            if filter_stats:
+                st.json(filter_stats)
+        
+        with col2:
+            st.write("**최근 필터 활동:**")
+            st.info("필터 활동 로그는 향후 버전에서 구현될 예정입니다.")
         
         # 로그 섹션 (향후 구현)
         st.markdown("---")
@@ -427,7 +719,7 @@ def main():
     # =============================================================================
     # 사용자 요청 조회
     # =============================================================================
-    with tab5:
+    with tab6:
         st.subheader("📋 요청 목록")
 
         if st.button("🔄 새로고침", key="main_refresh"):
@@ -508,6 +800,7 @@ def main():
                                 **메시지:**  
                                 {selected_message['content']}
                                 """)
+
 
 # API 엔드포인트 설정
 API_BASE_URL = BACKEND_URL
