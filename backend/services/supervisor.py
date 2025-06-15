@@ -1236,17 +1236,33 @@ JSON 형식으로 응답하세요:
             raise ValueError(f"지원하지 않는 모델: {model_name}")
 
     def load_mcp_config(self) -> Dict:
-        """MCP 설정 파일 로드"""
-        config_path = "mcp-config/mcp_config.json"
+        """MCP 설정 파일 로드 - 데이터베이스에서"""
         try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            self.logger.warning(f"MCP 설정 파일을 찾을 수 없습니다: {config_path}")
-            return {"mcpServers": {}}
+            from services.mcp_tool_service import MCPToolService
+            config = MCPToolService.get_mcp_config_for_client()
+            
+            if config and config.get("mcpServers"):
+                self.logger.info(f"데이터베이스에서 MCP 설정 로드 완료: {len(config['mcpServers'])}개 도구")
+            else:
+                self.logger.warning("데이터베이스에 활성화된 MCP 도구가 없습니다")
+                
+            return config
+            
         except Exception as e:
-            self.logger.error(f"MCP 설정 로드 실패: {e}")
-            return {"mcpServers": {}}
+            self.logger.error(f"데이터베이스에서 MCP 설정 로드 실패: {e}")
+            # 폴백: 기존 JSON 파일에서 로드 시도
+            try:
+                config_path = "mcp-config/mcp_config.json"
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    self.logger.info(f"폴백: JSON 파일에서 MCP 설정 로드 완료")
+                    return config
+            except FileNotFoundError:
+                self.logger.warning(f"MCP 설정 파일을 찾을 수 없습니다: {config_path}")
+                return {"mcpServers": {}}
+            except Exception as file_e:
+                self.logger.error(f"JSON 파일에서도 MCP 설정 로드 실패: {file_e}")
+                return {"mcpServers": {}}
 
     async def get_agent_status(self) -> Dict[str, Any]:
         """에이전트 상태 정보 (HITL 정보 포함)"""

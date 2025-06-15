@@ -24,7 +24,7 @@ class AdminAPIClient:
         self.headers = {"Authorization": "Bearer admin_token"}
     
     def get_tools(self) -> List[Dict]:
-        """도구 목록 조회"""
+        """도구 목록 조회 - 새로운 API 사용"""
         try:
             response = requests.get(f"{self.base_url}/api/admin/tools", headers=self.headers)
             response.raise_for_status()
@@ -33,10 +33,14 @@ class AdminAPIClient:
             st.error(f"도구 조회 실패: {e}")
             return []
     
-    def add_tool(self, name: str, config: Dict) -> bool:
-        """도구 추가"""
+    def add_tool(self, name: str, config: Dict, description: str = "") -> bool:
+        """도구 추가 - 새로운 API 사용"""
         try:
-            data = {"name": name, "config": config}
+            data = {
+                "name": name, 
+                "config": config,
+                "description": description
+            }
             response = requests.post(f"{self.base_url}/api/admin/tools", headers=self.headers, json=data)
             response.raise_for_status()
             return True
@@ -45,7 +49,7 @@ class AdminAPIClient:
             return False
     
     def delete_tool(self, name: str) -> bool:
-        """도구 삭제"""
+        """도구 삭제 - 새로운 API 사용"""
         try:
             response = requests.delete(f"{self.base_url}/api/admin/tools/{name}", headers=self.headers)
             response.raise_for_status()
@@ -53,6 +57,16 @@ class AdminAPIClient:
         except Exception as e:
             st.error(f"도구 삭제 실패: {e}")
             return False
+
+    def get_mcp_tool_stats(self) -> Dict:
+        """MCP 도구 통계 조회"""
+        try:
+            response = requests.get(f"{self.base_url}/api/admin/tools/stats", headers=self.headers)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            st.error(f"MCP 도구 통계 조회 실패: {e}")
+            return {}        
     
     def apply_changes(self) -> bool:
         """변경사항 적용"""
@@ -692,6 +706,185 @@ def render_filter_management_tab(api_client: AdminAPIClient):
                 st.session_state.test_text = example
                 st.rerun()
 
+# 도구 관리 탭 렌더링 함수 수정
+def render_tool_management_tab(api_client: AdminAPIClient):
+    """도구 관리 탭 렌더링 - 데이터베이스 기반"""
+    st.subheader("🔧 MCP 도구 관리 (데이터베이스)")
+    
+    # MCP 도구 통계 표시
+    col1, col2, col3, col4 = st.columns(4)
+    
+    mcp_stats = api_client.get_mcp_tool_stats()
+    
+    with col1:
+        st.metric(
+            label="🛠️ 전체 도구",
+            value=mcp_stats.get("total_tools", 0)
+        )
+    
+    with col2:
+        st.metric(
+            label="✅ 활성 도구",
+            value=mcp_stats.get("active_tools", 0)
+        )
+    
+    with col3:
+        st.metric(
+            label="❌ 비활성 도구",
+            value=mcp_stats.get("inactive_tools", 0)
+        )
+    
+    with col4:
+        # Transport 통계
+        transport_stats = mcp_stats.get("transport_stats", {})
+        st.metric(
+            label="📊 Transport 종류",
+            value=len(transport_stats)
+        )
+    
+    st.markdown("---")
+    
+    # 현재 도구 목록
+    tools = api_client.get_tools()
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.write("**등록된 도구 (데이터베이스):**")
+        if tools:
+            for tool in tools:
+                status_icon = "✅" if tool.get('active', True) else "❌"
+                
+                with st.expander(f"{status_icon} {tool['name']} ({tool.get('transport', 'stdio')})"):
+                    col_info, col_action = st.columns([3, 1])
+                    
+                    with col_info:
+                        st.write(f"**ID:** {tool.get('id', 'N/A')}")
+                        st.write(f"**설명:** {tool.get('description', '설명 없음')}")
+                        st.write(f"**Transport:** {tool.get('transport', 'stdio')}")
+                        if tool.get('command'):
+                            st.write(f"**Command:** {tool.get('command')}")
+                        if tool.get('args'):
+                            st.write(f"**Args:** {', '.join(tool.get('args', []))}")
+                        if tool.get('url'):
+                            st.write(f"**URL:** {tool.get('url')}")
+                        
+                        # 설정 JSON 표시
+                        if tool.get('config'):
+                            st.write("**설정 JSON:**")
+                            
+                            # 버튼으로 JSON 보기/숨기기 토글
+                            show_config_key = f"show_config_{tool['name']}"
+                            if show_config_key not in st.session_state:
+                                st.session_state[show_config_key] = False
+                            
+                            if st.button(
+                                "🔽 설정 보기" if not st.session_state[show_config_key] else "🔼 설정 숨기기",
+                                key=f"toggle_config_{tool['name']}"
+                            ):
+                                st.session_state[show_config_key] = not st.session_state[show_config_key]
+                            
+                            # 설정이 보이도록 설정된 경우에만 표시
+                            if st.session_state[show_config_key]:
+                                st.json(tool['config'])
+                    
+                    with col_action:
+                        if st.button("❌ 삭제", key=f"delete_{tool['name']}"):
+                            if api_client.delete_tool(tool['name']):
+                                st.success(f"도구 '{tool['name']}'이 삭제되었습니다!")
+                                st.rerun()
+        else:
+            st.info("등록된 도구가 없습니다.")
+    
+    with col2:
+        st.write("**새 도구 추가:**")
+        
+        # Smithery 링크
+        st.markdown("**[Smithery](https://smithery.ai/)에서 도구 찾기**")
+        
+        with st.form("add_tool_form"):
+            tool_name = st.text_input("도구 이름")
+            tool_description = st.text_input("도구 설명 (선택사항)")
+            
+            # 도구 타입 선택
+            transport_type = st.selectbox(
+                "Transport 타입",
+                ["stdio", "sse"]
+            )
+            
+            if transport_type == "stdio":
+                command = st.text_input("Command", value="python")
+                args_text = st.text_area(
+                    "Arguments (한 줄에 하나씩)",
+                    placeholder="예:\n/path/to/server.py\n--option\nvalue"
+                )
+                
+                # JSON 직접 입력 옵션
+                use_json = st.checkbox("JSON 직접 입력")
+                if use_json:
+                    tool_json = st.text_area(
+                        "전체 JSON 설정",
+                        height=200,
+                        placeholder='{"command": "python", "args": ["/path/to/server.py"], "transport": "stdio"}'
+                    )
+                
+            else:  # sse
+                url = st.text_input("서버 URL", placeholder="http://localhost:3000/sse")
+                tool_json = None
+            
+            submitted = st.form_submit_button("도구 추가", use_container_width=True)
+            
+            if submitted and tool_name:
+                try:
+                    if transport_type == "stdio":
+                        if use_json and tool_json:
+                            config = json.loads(tool_json)
+                        else:
+                            args = [arg.strip() for arg in args_text.split('\n') if arg.strip()]
+                            config = {
+                                "command": command,
+                                "args": args,
+                                "transport": "stdio"
+                            }
+                    else:  # sse
+                        config = {
+                            "url": url,
+                            "transport": "sse"
+                        }
+                    
+                    if api_client.add_tool(tool_name, config, tool_description):
+                        st.success("도구가 성공적으로 추가되었습니다!")
+                        st.rerun()
+                        
+                except json.JSONDecodeError:
+                    st.error("올바른 JSON 형식이 아닙니다.")
+                except Exception as e:
+                    st.error(f"도구 추가 실패: {e}")
+    
+    # Transport 통계 표시
+    if mcp_stats.get("transport_stats"):
+        st.markdown("---")
+        st.subheader("📊 Transport 통계")
+        
+        transport_stats = mcp_stats["transport_stats"]
+        cols = st.columns(len(transport_stats))
+        
+        for i, (transport, count) in enumerate(transport_stats.items()):
+            with cols[i]:
+                st.metric(
+                    label=f"{transport.upper()}",
+                    value=f"{count}개"
+                )
+    
+    # 변경사항 적용
+    st.markdown("---")
+    col1, col2, col3 = st.columns([2, 1, 2])
+    
+    with col2:
+        if st.button("🔄 변경사항 적용", use_container_width=True, type="primary"):
+            with st.spinner("에이전트 재초기화 중..."):
+                if api_client.apply_changes():
+                    st.success("변경사항이 에이전트에 적용되었습니다!")
+                    st.rerun()
 
 def main():
     if not check_admin_login():
@@ -805,110 +998,8 @@ def main():
     # 도구 관리 탭
     # =============================================================================
     with tab2:
-        st.subheader("🔧 MCP 도구 관리")
-        
-        # 현재 도구 목록
-        tools = api_client.get_tools()
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            st.write("**등록된 도구:**")
-            if tools:
-                for tool in tools:
-                    with st.expander(f"🛠️ {tool['name']}"):
-                        col_info, col_action = st.columns([3, 1])
-                        
-                        with col_info:
-                            st.write(f"**Transport:** {tool.get('transport', 'stdio')}")
-                            st.write(f"**Command:** {tool.get('command', 'N/A')}")
-                            if tool.get('args'):
-                                st.write(f"**Args:** {', '.join(tool['args'])}")
-                            if tool.get('url'):
-                                st.write(f"**URL:** {tool['url']}")
-                        
-                        with col_action:
-                            if st.button("❌ 삭제", key=f"delete_{tool['name']}"):
-                                if api_client.delete_tool(tool['name']):
-                                    st.success(f"도구 '{tool['name']}'이 삭제되었습니다!")
-                                    st.rerun()
-            else:
-                st.info("등록된 도구가 없습니다.")
-        
-        with col2:
-            st.write("**새 도구 추가:**")
-            
-            # Smithery 링크
-            st.markdown("**[Smithery](https://smithery.ai/)에서 도구 찾기**")
-            
-            with st.form("add_tool_form"):
-                tool_name = st.text_input("도구 이름")
-                
-                # 도구 타입 선택
-                transport_type = st.selectbox(
-                    "Transport 타입",
-                    ["stdio", "streamable_http"]
-                )
-                
-                if transport_type == "stdio":
-                    command = st.text_input("Command", value="python")
-                    args_text = st.text_area(
-                        "Arguments (한 줄에 하나씩)",
-                        placeholder="예:\n/path/to/server.py\n--option\nvalue"
-                    )
-                    
-                    # JSON 직접 입력 옵션
-                    use_json = st.checkbox("JSON 직접 입력")
-                    if use_json:
-                        tool_json = st.text_area(
-                            "전체 JSON 설정",
-                            height=200,
-                            placeholder='{"command": "python", "args": ["/path/to/server.py"], "transport": "stdio"}'
-                        )
-                    
-                else:  # streamable_http
-                    url = st.text_input("서버 URL", placeholder="http://localhost:3000/mcp")
-                    tool_json = None
-                
-                submitted = st.form_submit_button("도구 추가", use_container_width=True)
-                
-                if submitted and tool_name:
-                    try:
-                        if transport_type == "stdio":
-                            if use_json and tool_json:
-                                config = json.loads(tool_json)
-                            else:
-                                args = [arg.strip() for arg in args_text.split('\n') if arg.strip()]
-                                config = {
-                                    "command": command,
-                                    "args": args,
-                                    "transport": "stdio"
-                                }
-                        else:  # streamable_http
-                            config = {
-                                "url": url,
-                                "transport": "streamable_http"
-                            }
-                        
-                        if api_client.add_tool(tool_name, config):
-                            st.success("도구가 성공적으로 추가되었습니다!")
-                            st.rerun()
-                            
-                    except json.JSONDecodeError:
-                        st.error("올바른 JSON 형식이 아닙니다.")
-                    except Exception as e:
-                        st.error(f"도구 추가 실패: {e}")
-        
-        # 변경사항 적용
-        st.markdown("---")
-        col1, col2, col3 = st.columns([2, 1, 2])
-        
-        with col2:
-            if st.button("🔄 변경사항 적용", use_container_width=True, type="primary"):
-                with st.spinner("에이전트 재초기화 중..."):
-                    if api_client.apply_changes():
-                        st.success("변경사항이 에이전트에 적용되었습니다!")
-                        st.rerun()
-    
+        render_tool_management_tab(api_client)
+
     # =============================================================================
     # 필터 관리 탭 (새로 추가)
     # =============================================================================

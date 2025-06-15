@@ -86,17 +86,31 @@ class MCPAgentService:
             raise ValueError(f"지원하지 않는 모델: {model_name}")
     
     def load_mcp_config(self) -> Dict:
-        """MCP 설정 파일 로드"""
-        config_path = "mcp-config/mcp_config.json"
+        """MCP 설정 파일 로드 - 데이터베이스에서"""
         try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            print(f"MCP 설정 파일을 찾을 수 없습니다: {config_path}")
-            return {"mcpServers": {}}
+            from services.mcp_tool_service import MCPToolService
+            config = MCPToolService.get_mcp_config_for_client()
+            
+            if config and config.get("mcpServers"):
+                print(f"데이터베이스에서 MCP 설정 로드 완료: {len(config['mcpServers'])}개 도구")
+            else:
+                print("데이터베이스에 활성화된 MCP 도구가 없습니다")
+                
+            return config
+            
         except Exception as e:
-            print(f"MCP 설정 로드 실패: {e}")
-            return {"mcpServers": {}}
+            print(f"데이터베이스에서 MCP 설정 로드 실패: {e}")
+            # 폴백: 기존 JSON 파일에서 로드 시도
+            try:
+                config_path = "mcp-config/mcp_config.json"
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except FileNotFoundError:
+                print(f"MCP 설정 파일을 찾을 수 없습니다: {config_path}")
+                return {"mcpServers": {}}
+            except Exception as file_e:
+                print(f"JSON 파일에서도 MCP 설정 로드 실패: {file_e}")
+                return {"mcpServers": {}}
     
     def load_system_prompt(self) -> str:
         """시스템 프롬프트 로드"""
