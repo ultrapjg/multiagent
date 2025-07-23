@@ -146,7 +146,7 @@ class SupervisorService:
         self.logger.info(f"HITL 설정 업데이트: {self.hitl_config}")
 
     async def initialize_agent(self,
-                               model_name: str = "qwen2.5:32b",
+                               model_name: Optional[str] = None,
                                evaluator_model_name: Optional[str] = None,
                                mcp_config: Optional[Dict] = None,
                                system_prompt: Optional[str] = None,
@@ -154,6 +154,8 @@ class SupervisorService:
                                human_input_callback: Optional[Callable] = None):
         """동적 워크플로우 에이전트 초기화"""
         try:
+            if model_name is None:
+                model_name = os.getenv("LOCAL_MODEL_NAME", "qwen:7b")
             self.logger.info(f"HITL 지원 동적 워크플로우 에이전트 초기화 시작: {model_name}")
 
             # Human input callback 설정
@@ -1635,9 +1637,9 @@ JSON 형식으로 응답하세요:
                 temperature=0.1,
                 max_tokens=output_tokens.get(model_name, 16000)
             )
-        elif model_name.startswith("qwen2.5:32b"):
+        elif model_name.startswith("qwen"):
             return ChatOllama(
-                model="qwen2.5:32b",
+                model=os.getenv("LOCAL_MODEL_NAME", "qwen:7b"),
                 temperature=0.1
             )
         else:
