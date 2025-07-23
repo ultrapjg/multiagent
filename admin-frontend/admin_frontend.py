@@ -1036,11 +1036,11 @@ def main():
             with st.form("agent_config_form"):
                 model_options = [
                     "claude-3-5-sonnet-latest",
-                    "claude-3-5-haiku-latest", 
+                    "claude-3-5-haiku-latest",
                     "claude-3-7-sonnet-latest",
                     "gpt-4o",
                     "gpt-4o-mini",
-                    "qwen2.5:32b",
+                    os.getenv("LOCAL_MODEL_NAME", "qwen:7b"),
                 ]
                 
                 selected_model = st.selectbox(

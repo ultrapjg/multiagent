@@ -7,6 +7,11 @@ from typing import Optional, Dict, Any
 import json
 import asyncio
 import logging
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv(override=True)
 
 from services.supervisor import SupervisorService
 from services.message import MessageService
@@ -171,7 +176,7 @@ async def get_default_model_name() -> str:
         return model_name
     else:
         # 로컬 모델 사용
-        default_model = "qwen2.5:32b"
+        default_model = os.getenv("LOCAL_MODEL_NAME", "qwen:7b")
         print(f"📋 외부 API 키 없음 - 로컬 모델 사용: {default_model}")
         return default_model
 
