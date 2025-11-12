@@ -4,7 +4,7 @@ import os
 from typing import Dict, List, Any, AsyncGenerator, Optional
 from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
-from langchain_ollama import ChatOllama
+from langchain_community.chat_models import ChatOllama
 from langchain_mcp_adapters.client import MultiServerMCPClient, load_mcp_tools
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import InMemorySaver
@@ -83,7 +83,8 @@ class MCPAgentService:
                 max_tokens=output_tokens.get(model_name, 16000)
             )
         else:
-            raise ValueError(f"지원하지 않는 모델: {model_name}")
+            # Assume it's an Ollama model
+            return ChatOllama(model=model_name)
     
     def load_mcp_config(self) -> Dict:
         """MCP 설정 파일 로드 - 데이터베이스에서"""

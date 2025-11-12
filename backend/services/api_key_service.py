@@ -48,19 +48,32 @@ class APIKeyService:
             if expires_days:
                 expires_at = datetime.now() + timedelta(days=expires_days)
 
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
+            with get_db_connection() as (conn, cursor):
+                from database import DB_TYPE
 
-                cursor.execute(
-                    """
+                query = """
                     INSERT INTO api_keys (name, key_hash, description, expires_at) 
-                    VALUES (%s, %s, %s, %s) 
-                    RETURNING id, name, description, created_at, expires_at, is_active
-                    """,
-                    (name, key_hash, description, expires_at)
-                )
+                    VALUES (?, ?, ?, ?)
+                """
+                params = (name, key_hash, description, expires_at)
 
-                row = cursor.fetchone()
+                if DB_TYPE == "postgres":
+                    query = """
+                        INSERT INTO api_keys (name, key_hash, description, expires_at) 
+                        VALUES (%s, %s, %s, %s) 
+                        RETURNING id, name, description, created_at, expires_at, is_active
+                    """
+                
+                cursor.execute(query, params)
+
+                if DB_TYPE == "sqlite":
+                    # SQLite에서는 RETURNING을 지원하지 않으므로, 마지막 삽입 ID를 가져와 다시 조회
+                    last_id = cursor.lastrowid
+                    cursor.execute("SELECT id, name, description, created_at, expires_at, is_active FROM api_keys WHERE id = ?", (last_id,))
+                    row = cursor.fetchone()
+                else:
+                    row = cursor.fetchone()
+                
                 conn.commit()
 
                 result = {
@@ -94,8 +107,10 @@ class APIKeyService:
         try:
             logger.info(f"📋 API 키 목록 조회 | 비활성화 포함: {include_inactive}")
 
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
+            with get_db_connection() as (conn, cursor):
+                from database import DB_TYPE
+
+                now_func = "NOW()" if DB_TYPE == "postgres" else "CURRENT_TIMESTAMP"
 
                 if include_inactive:
                     query = """
@@ -105,10 +120,10 @@ class APIKeyService:
                     """
                     cursor.execute(query)
                 else:
-                    query = """
+                    query = f"""
                         SELECT id, name, description, created_at, expires_at, is_active, last_used_at
                         FROM api_keys 
-                        WHERE is_active = true AND (expires_at IS NULL OR expires_at > NOW())
+                        WHERE is_active = 1 AND (expires_at IS NULL OR expires_at > {now_func})
                         ORDER BY created_at DESC
                     """
                     cursor.execute(query)
@@ -155,14 +170,16 @@ class APIKeyService:
         try:
             logger.info(f"🔍 API 키 조회 | ID: {key_id}")
 
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
+            with get_db_connection() as (conn, cursor):
+                from database import DB_TYPE
+                
+                param_style = "%s" if DB_TYPE == "postgres" else "?"
 
                 cursor.execute(
-                    """
+                    f"""
                     SELECT id, name, description, created_at, expires_at, is_active, last_used_at
                     FROM api_keys 
-                    WHERE id = %s
+                    WHERE id = {param_style}
                     """,
                     (key_id,)
                 )
@@ -214,14 +231,17 @@ class APIKeyService:
 
             key_hash = APIKeyService.hash_api_key(api_key)
 
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
+            with get_db_connection() as (conn, cursor):
+                from database import DB_TYPE
+                
+                param_style = "%s" if DB_TYPE == "postgres" else "?"
+                now_func = "NOW()" if DB_TYPE == "postgres" else "CURRENT_TIMESTAMP"
 
                 cursor.execute(
-                    """
+                    f"""
                     SELECT id, name, description, created_at, expires_at, is_active
                     FROM api_keys 
-                    WHERE key_hash = %s
+                    WHERE key_hash = {param_style}
                     """,
                     (key_hash,)
                 )
@@ -244,7 +264,7 @@ class APIKeyService:
 
                 # 마지막 사용 시간 업데이트
                 cursor.execute(
-                    "UPDATE api_keys SET last_used_at = NOW() WHERE id = %s",
+                    f"UPDATE api_keys SET last_used_at = {now_func} WHERE id = {param_style}",
                     (row['id'],)
                 )
                 conn.commit()
@@ -287,11 +307,12 @@ class APIKeyService:
 
             logger.info(f"✏️ API 키 수정 시작 | ID: {key_id}")
 
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
+            with get_db_connection() as (conn, cursor):
+                from database import DB_TYPE
+                param_style = "%s" if DB_TYPE == "postgres" else "?"
 
                 # 키 존재 여부 확인
-                cursor.execute("SELECT id FROM api_keys WHERE id = %s", (key_id,))
+                cursor.execute(f"SELECT id FROM api_keys WHERE id = {param_style}", (key_id,))
                 if not cursor.fetchone():
                     logger.warning(f"🔍 수정할 API 키를 찾을 수 없음 | ID: {key_id}")
                     return None
@@ -301,15 +322,15 @@ class APIKeyService:
                 values = []
 
                 if name:
-                    update_fields.append("name = %s")
+                    update_fields.append(f"name = {param_style}")
                     values.append(name)
 
                 if description is not None:
-                    update_fields.append("description = %s")
+                    update_fields.append(f"description = {param_style}")
                     values.append(description)
 
                 if is_active is not None:
-                    update_fields.append("is_active = %s")
+                    update_fields.append(f"is_active = {param_style}")
                     values.append(is_active)
 
                 values.append(key_id)
@@ -317,12 +338,20 @@ class APIKeyService:
                 query = f"""
                     UPDATE api_keys 
                     SET {', '.join(update_fields)}
-                    WHERE id = %s
-                    RETURNING id, name, description, created_at, expires_at, is_active, last_used_at
+                    WHERE id = {param_style}
                 """
 
+                if DB_TYPE == "postgres":
+                    query += " RETURNING id, name, description, created_at, expires_at, is_active, last_used_at"
+
                 cursor.execute(query, values)
-                row = cursor.fetchone()
+
+                if DB_TYPE == "sqlite":
+                    cursor.execute(f"SELECT id, name, description, created_at, expires_at, is_active, last_used_at FROM api_keys WHERE id = {param_style}", (key_id,))
+                    row = cursor.fetchone()
+                else:
+                    row = cursor.fetchone()
+                
                 conn.commit()
 
                 # 만료 상태 확인
@@ -363,18 +392,19 @@ class APIKeyService:
         try:
             logger.info(f"🗑️ API 키 삭제 시작 | ID: {key_id}, 소프트삭제: {soft_delete}")
 
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
+            with get_db_connection(use_dict_cursor=False) as (conn, cursor):
+                from database import DB_TYPE
+                param_style = "%s" if DB_TYPE == "postgres" else "?"
 
                 if soft_delete:
                     # 소프트 삭제: 비활성화
                     cursor.execute(
-                        "UPDATE api_keys SET is_active = false WHERE id = %s", 
+                        f"UPDATE api_keys SET is_active = false WHERE id = {param_style}", 
                         (key_id,)
                     )
                 else:
                     # 하드 삭제: 완전 제거
-                    cursor.execute("DELETE FROM api_keys WHERE id = %s", (key_id,))
+                    cursor.execute(f"DELETE FROM api_keys WHERE id = {param_style}", (key_id,))
 
                 if cursor.rowcount == 0:
                     logger.warning(f"🗑️ 삭제할 API 키를 찾을 수 없음 | ID: {key_id}")
@@ -400,31 +430,41 @@ class APIKeyService:
         try:
             logger.info("📊 API 키 통계 조회 시작")
 
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
+            with get_db_connection() as (conn, cursor):
+                from database import DB_TYPE
+                now_func = "NOW()" if DB_TYPE == "postgres" else "CURRENT_TIMESTAMP"
+                interval_24h = "INTERVAL '24 hours'" if DB_TYPE == "postgres" else "'-24 hours'"
+
 
                 # 전체 키 수
                 cursor.execute("SELECT COUNT(*) as total FROM api_keys")
                 total_keys = cursor.fetchone()['total']
 
                 # 활성 키 수
-                cursor.execute("SELECT COUNT(*) as active FROM api_keys WHERE is_active = true")
+                cursor.execute("SELECT COUNT(*) as active FROM api_keys WHERE is_active = 1")
                 active_keys = cursor.fetchone()['active']
 
                 # 만료된 키 수
-                cursor.execute("""
+                cursor.execute(f"""
                     SELECT COUNT(*) as expired 
                     FROM api_keys 
-                    WHERE expires_at IS NOT NULL AND expires_at < NOW()
+                    WHERE expires_at IS NOT NULL AND expires_at < {now_func}
                 """)
                 expired_keys = cursor.fetchone()['expired']
 
                 # 최근 24시간 내 사용된 키 수
-                cursor.execute("""
-                    SELECT COUNT(*) as recent_used 
-                    FROM api_keys 
-                    WHERE last_used_at >= NOW() - INTERVAL '24 hours'
-                """)
+                if DB_TYPE == "postgres":
+                    cursor.execute(f"""
+                        SELECT COUNT(*) as recent_used 
+                        FROM api_keys 
+                        WHERE last_used_at >= {now_func} - {interval_24h}
+                    """)
+                else:
+                     cursor.execute(f"""
+                        SELECT COUNT(*) as recent_used 
+                        FROM api_keys 
+                        WHERE last_used_at >= datetime({now_func}, {interval_24h})
+                    """)
                 recent_used = cursor.fetchone()['recent_used']
 
                 # 가장 최근에 생성된 키

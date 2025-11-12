@@ -14,7 +14,7 @@ def run_backend():
         raise FileNotFoundError(f"'backend' 폴더를 찾을 수 없습니다: {backend_path}")
 
     os.chdir(backend_path)
-    subprocess.run(['python', 'main.py'])
+    subprocess.run(['python', 'orchestrator.py'])
 
 def run_user_frontend():
     base_dir = os.path.dirname(__file__)        # => d:\Architect과정\팀과제\multi-agent\test
@@ -26,7 +26,7 @@ def run_user_frontend():
 
     os.chdir(frontend_path)
     # os.chdir('user-frontend')
-    subprocess.run(['streamlit', 'run', 'main.py', '--server.port=8501'])
+    subprocess.run(['streamlit', 'run', 'user_frontend.py', '--server.port=8501'])
 
 def run_admin_frontend():
     base_dir = os.path.dirname(__file__)        # => d:\Architect과정\팀과제\multi-agent\test
@@ -39,7 +39,7 @@ def run_admin_frontend():
     os.chdir(admin_path)
     # os.chdir('admin-frontend')
 
-    subprocess.run(['streamlit', 'run', 'main.py', '--server.port=8502'])
+    subprocess.run(['streamlit', 'run', 'admin_frontend.py', '--server.port=8502'])
 
 def main():
     print("🚀 LangGraph MCP 에이전트 시스템 시작...")

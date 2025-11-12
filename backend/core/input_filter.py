@@ -19,8 +19,7 @@ class InputFilter:
         try:
             logger.info("📋 필터 규칙 로딩 시작")
             
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
+            with get_db_connection() as (conn, cursor):
                 cursor.execute("SELECT id, name, pattern FROM filter_rules ORDER BY id")
                 rows = cursor.fetchall()
                 
@@ -127,10 +126,7 @@ class InputFilter:
 def init_filter_db():
     """Initialize filter rules database table."""
     try:
-        logger.info("🚀 필터 규칙 테이블 초기화 시작")
-        
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
+        with get_db_connection(use_dict_cursor=False) as (conn, cursor):
             
             # 테이블 생성
             cursor.execute('''
@@ -161,8 +157,7 @@ def init_filter_db():
 def test_filter_connection():
     """Test filter database connection."""
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
+        with get_db_connection(use_dict_cursor=False) as (conn, cursor):
             cursor.execute("SELECT COUNT(*) FROM filter_rules")
             count = cursor.fetchone()[0]
             logger.info(f"✅ 필터 DB 연결 테스트 성공: {count}개 규칙 존재")

@@ -30,19 +30,32 @@ class MessageService:
         try:
             logger.info(f"📝 메시지 생성 시작 | 작성자: {author} | 내용길이: {len(content)}")
 
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
+            with get_db_connection() as (conn, cursor):
+                from database import DB_TYPE
+                param_style = "%s" if DB_TYPE == "postgres" else "?"
 
-                cursor.execute(
-                    """
-                    INSERT INTO messages (content, author) 
-                    VALUES (%s, %s) 
-                    RETURNING id, content, author, created_at
-                    """,
-                    (content, author)
-                )
+                if DB_TYPE == "postgres":
+                    cursor.execute(
+                        f"""
+                        INSERT INTO messages (content, author) 
+                        VALUES ({param_style}, {param_style}) 
+                        RETURNING id, content, author, created_at
+                        """,
+                        (content, author)
+                    )
+                    row = cursor.fetchone()
+                else:
+                    cursor.execute(
+                        f"""
+                        INSERT INTO messages (content, author) 
+                        VALUES ({param_style}, {param_style})
+                        """,
+                        (content, author)
+                    )
+                    last_id = cursor.lastrowid
+                    cursor.execute(f"SELECT id, content, author, created_at FROM messages WHERE id = {param_style}", (last_id,))
+                    row = cursor.fetchone()
 
-                row = cursor.fetchone()
                 conn.commit()
 
                 result = {
@@ -75,8 +88,9 @@ class MessageService:
         try:
             logger.info(f"📋 메시지 목록 조회 | limit: {limit}, offset: {offset}, author: {author}")
 
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
+            with get_db_connection() as (conn, cursor):
+                from database import DB_TYPE
+                param_style = "%s" if DB_TYPE == "postgres" else "?"
 
                 base_query = """
                     SELECT id, content, author, created_at 
@@ -84,16 +98,16 @@ class MessageService:
                 """
 
                 if author:
-                    query = base_query + """
-                        WHERE author ILIKE %s
+                    query = base_query + f"""
+                        WHERE author ILIKE {param_style}
                         ORDER BY created_at DESC 
-                        LIMIT %s OFFSET %s
+                        LIMIT {param_style} OFFSET {param_style}
                     """
                     cursor.execute(query, (f"%{author}%", limit, offset))
                 else:
-                    query = base_query + """
+                    query = base_query + f"""
                         ORDER BY created_at DESC 
-                        LIMIT %s OFFSET %s
+                        LIMIT {param_style} OFFSET {param_style}
                     """
                     cursor.execute(query, (limit, offset))
 
@@ -130,14 +144,15 @@ class MessageService:
         try:
             logger.info(f"🔍 메시지 조회 | ID: {message_id}")
 
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
+            with get_db_connection() as (conn, cursor):
+                from database import DB_TYPE
+                param_style = "%s" if DB_TYPE == "postgres" else "?"
 
                 cursor.execute(
-                    """
+                    f"""
                     SELECT id, content, author, created_at 
                     FROM messages 
-                    WHERE id = %s
+                    WHERE id = {param_style}
                     """,
                     (message_id,)
                 )
@@ -182,11 +197,12 @@ class MessageService:
 
             logger.info(f"✏️ 메시지 수정 시작 | ID: {message_id}")
 
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
+            with get_db_connection() as (conn, cursor):
+                from database import DB_TYPE
+                param_style = "%s" if DB_TYPE == "postgres" else "?"
 
                 # 메시지 존재 여부 확인
-                cursor.execute("SELECT id FROM messages WHERE id = %s", (message_id,))
+                cursor.execute(f"SELECT id FROM messages WHERE id = {param_style}", (message_id,))
                 if not cursor.fetchone():
                     logger.warning(f"🔍 수정할 메시지를 찾을 수 없음 | ID: {message_id}")
                     return None
@@ -196,11 +212,11 @@ class MessageService:
                 values = []
 
                 if content:
-                    update_fields.append("content = %s")
+                    update_fields.append(f"content = {param_style}")
                     values.append(content)
 
                 if author:
-                    update_fields.append("author = %s")
+                    update_fields.append(f"author = {param_style}")
                     values.append(author)
 
                 values.append(message_id)
@@ -208,12 +224,20 @@ class MessageService:
                 query = f"""
                     UPDATE messages 
                     SET {', '.join(update_fields)}
-                    WHERE id = %s
-                    RETURNING id, content, author, created_at
+                    WHERE id = {param_style}
                 """
 
+                if DB_TYPE == "postgres":
+                    query += " RETURNING id, content, author, created_at"
+                
                 cursor.execute(query, values)
-                row = cursor.fetchone()
+
+                if DB_TYPE == "sqlite":
+                    cursor.execute(f"SELECT id, content, author, created_at FROM messages WHERE id = {param_style}", (message_id,))
+                    row = cursor.fetchone()
+                else:
+                    row = cursor.fetchone()
+                
                 conn.commit()
 
                 result = {
@@ -244,10 +268,11 @@ class MessageService:
         try:
             logger.info(f"🗑️ 메시지 삭제 시작 | ID: {message_id}")
 
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
+            with get_db_connection(use_dict_cursor=False) as (conn, cursor):
+                from database import DB_TYPE
+                param_style = "%s" if DB_TYPE == "postgres" else "?"
 
-                cursor.execute("DELETE FROM messages WHERE id = %s", (message_id,))
+                cursor.execute(f"DELETE FROM messages WHERE id = {param_style}", (message_id,))
 
                 if cursor.rowcount == 0:
                     logger.warning(f"🗑️ 삭제할 메시지를 찾을 수 없음 | ID: {message_id}")
@@ -272,8 +297,10 @@ class MessageService:
         try:
             logger.info("📊 메시지 통계 조회 시작")
 
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
+            with get_db_connection() as (conn, cursor):
+                from database import DB_TYPE
+                now_func = "NOW()" if DB_TYPE == "postgres" else "CURRENT_TIMESTAMP"
+                interval_24h = "INTERVAL '24 hours'" if DB_TYPE == "postgres" else "'-24 hours'"
 
                 # 전체 메시지 수
                 cursor.execute("SELECT COUNT(*) as total FROM messages")
@@ -284,11 +311,18 @@ class MessageService:
                 total_authors = cursor.fetchone()['total']
 
                 # 최근 24시간 메시지 수
-                cursor.execute("""
-                    SELECT COUNT(*) as recent 
-                    FROM messages 
-                    WHERE created_at >= NOW() - INTERVAL '24 hours'
-                """)
+                if DB_TYPE == "postgres":
+                    cursor.execute(f"""
+                        SELECT COUNT(*) as recent 
+                        FROM messages 
+                        WHERE created_at >= {now_func} - {interval_24h}
+                    """)
+                else:
+                    cursor.execute(f"""
+                        SELECT COUNT(*) as recent 
+                        FROM messages 
+                        WHERE created_at >= datetime({now_func}, {interval_24h})
+                    """)
                 recent_message_count = cursor.fetchone()['recent']
 
                 # 가장 활발한 작성자
@@ -327,8 +361,7 @@ class MessageService:
         try:
             logger.warning("🗑️ 모든 메시지 삭제 시작")
 
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
+            with get_db_connection(use_dict_cursor=False) as (conn, cursor):
 
                 cursor.execute("SELECT COUNT(*) FROM messages")
                 count_before = cursor.fetchone()[0]

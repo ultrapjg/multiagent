@@ -26,8 +26,8 @@ class MCPToolService:
         try:
             logger.info(f"📋 MCP 도구 목록 조회 | 비활성화 포함: {include_inactive}")
 
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
+            with get_db_connection() as (conn, cursor):
+                from database import DB_TYPE
 
                 if include_inactive:
                     query = """
@@ -37,10 +37,11 @@ class MCPToolService:
                     """
                     cursor.execute(query)
                 else:
-                    query = """
+                    active_param = 1 if DB_TYPE == "sqlite" else "true"
+                    query = f"""
                         SELECT id, name, description, transport, command, args, url, config, is_active, created_at, updated_at
                         FROM mcp_tools 
-                        WHERE is_active = true
+                        WHERE is_active = {active_param}
                         ORDER BY created_at DESC
                     """
                     cursor.execute(query)
@@ -84,14 +85,15 @@ class MCPToolService:
         try:
             logger.info(f"🔍 MCP 도구 조회 | ID: {tool_id}")
 
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
+            with get_db_connection() as (conn, cursor):
+                from database import DB_TYPE
+                param_style = "%s" if DB_TYPE == "postgres" else "?"
 
                 cursor.execute(
-                    """
+                    f"""
                     SELECT id, name, description, transport, command, args, url, config, is_active, created_at, updated_at
                     FROM mcp_tools 
-                    WHERE id = %s
+                    WHERE id = {param_style}
                     """,
                     (tool_id,)
                 )
@@ -135,14 +137,15 @@ class MCPToolService:
             Optional[Dict]: 도구 정보 또는 None
         """
         try:
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
+            with get_db_connection() as (conn, cursor):
+                from database import DB_TYPE
+                param_style = "%s" if DB_TYPE == "postgres" else "?"
 
                 cursor.execute(
-                    """
+                    f"""
                     SELECT id, name, description, transport, command, args, url, config, is_active, created_at, updated_at
                     FROM mcp_tools 
-                    WHERE name = %s
+                    WHERE name = {param_style}
                     """,
                     (tool_name,)
                 )
@@ -192,24 +195,39 @@ class MCPToolService:
             args = config.get("args", [])
             url = config.get("url")
 
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
+            with get_db_connection() as (conn, cursor):
+                from database import DB_TYPE
+                param_style = "%s" if DB_TYPE == "postgres" else "?"
 
                 # 중복 이름 검사
-                cursor.execute("SELECT id FROM mcp_tools WHERE name = %s", (name,))
+                cursor.execute(f"SELECT id FROM mcp_tools WHERE name = {param_style}", (name,))
                 if cursor.fetchone():
                     raise ValueError(f"도구 이름 '{name}'이 이미 존재합니다.")
 
-                cursor.execute(
-                    """
-                    INSERT INTO mcp_tools (name, description, transport, command, args, url, config) 
-                    VALUES (%s, %s, %s, %s, %s, %s, %s) 
-                    RETURNING id, name, description, transport, command, args, url, config, is_active, created_at, updated_at
-                    """,
-                    (name, description, transport, command, json.dumps(args) if args else None, url, json.dumps(config))
-                )
+                # SQLite는 JSON을 TEXT로 저장하므로, json.dumps 사용
+                args_json = json.dumps(args) if args else None
+                config_json = json.dumps(config)
 
-                row = cursor.fetchone()
+                if DB_TYPE == "postgres":
+                    query = f"""
+                        INSERT INTO mcp_tools (name, description, transport, command, args, url, config) 
+                        VALUES ({param_style}, {param_style}, {param_style}, {param_style}, {param_style}, {param_style}, {param_style}) 
+                        RETURNING id, name, description, transport, command, args, url, config, is_active, created_at, updated_at
+                    """
+                    params = (name, description, transport, command, args_json, url, config_json)
+                    cursor.execute(query, params)
+                    row = cursor.fetchone()
+                else: # sqlite
+                    query = f"""
+                        INSERT INTO mcp_tools (name, description, transport, command, args, url, config) 
+                        VALUES ({param_style}, {param_style}, {param_style}, {param_style}, {param_style}, {param_style}, {param_style})
+                    """
+                    params = (name, description, transport, command, args_json, url, config_json)
+                    cursor.execute(query, params)
+                    last_id = cursor.lastrowid
+                    cursor.execute(f"SELECT id, name, description, transport, command, args, url, config, is_active, created_at, updated_at FROM mcp_tools WHERE id = {param_style}", (last_id,))
+                    row = cursor.fetchone()
+
                 conn.commit()
 
                 result = {
@@ -257,11 +275,12 @@ class MCPToolService:
 
             logger.info(f"✏️ MCP 도구 수정 시작 | ID: {tool_id}")
 
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
+            with get_db_connection() as (conn, cursor):
+                from database import DB_TYPE
+                param_style = "%s" if DB_TYPE == "postgres" else "?"
 
                 # 도구 존재 여부 확인
-                cursor.execute("SELECT id FROM mcp_tools WHERE id = %s", (tool_id,))
+                cursor.execute(f"SELECT id FROM mcp_tools WHERE id = {param_style}", (tool_id,))
                 if not cursor.fetchone():
                     logger.warning(f"🔍 수정할 MCP 도구를 찾을 수 없음 | ID: {tool_id}")
                     return None
@@ -271,11 +290,11 @@ class MCPToolService:
                 values = []
 
                 if name:
-                    update_fields.append("name = %s")
+                    update_fields.append(f"name = {param_style}")
                     values.append(name)
 
                 if description is not None:
-                    update_fields.append("description = %s")
+                    update_fields.append(f"description = {param_style}")
                     values.append(description)
 
                 if config is not None:
@@ -286,11 +305,11 @@ class MCPToolService:
                     url = config.get("url")
 
                     update_fields.extend([
-                        "config = %s",
-                        "transport = %s",
-                        "command = %s",
-                        "args = %s",
-                        "url = %s"
+                        f"config = {param_style}",
+                        f"transport = {param_style}",
+                        f"command = {param_style}",
+                        f"args = {param_style}",
+                        f"url = {param_style}"
                     ])
                     values.extend([
                         json.dumps(config),
@@ -301,7 +320,7 @@ class MCPToolService:
                     ])
 
                 if is_active is not None:
-                    update_fields.append("is_active = %s")
+                    update_fields.append(f"is_active = {param_style}")
                     values.append(is_active)
 
                 values.append(tool_id)
@@ -309,12 +328,20 @@ class MCPToolService:
                 query = f"""
                     UPDATE mcp_tools 
                     SET {', '.join(update_fields)}
-                    WHERE id = %s
-                    RETURNING id, name, description, transport, command, args, url, config, is_active, created_at, updated_at
+                    WHERE id = {param_style}
                 """
 
+                if DB_TYPE == "postgres":
+                    query += " RETURNING id, name, description, transport, command, args, url, config, is_active, created_at, updated_at"
+                
                 cursor.execute(query, values)
-                row = cursor.fetchone()
+
+                if DB_TYPE == "sqlite":
+                    cursor.execute(f"SELECT id, name, description, transport, command, args, url, config, is_active, created_at, updated_at FROM mcp_tools WHERE id = {param_style}", (tool_id,))
+                    row = cursor.fetchone()
+                else:
+                    row = cursor.fetchone()
+                
                 conn.commit()
 
                 result = {
@@ -353,18 +380,19 @@ class MCPToolService:
         try:
             logger.info(f"🗑️ MCP 도구 삭제 시작 | ID: {tool_id}, 소프트삭제: {soft_delete}")
 
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
+            with get_db_connection(use_dict_cursor=False) as (conn, cursor):
+                from database import DB_TYPE
+                param_style = "%s" if DB_TYPE == "postgres" else "?"
 
                 if soft_delete:
                     # 소프트 삭제: 비활성화
                     cursor.execute(
-                        "UPDATE mcp_tools SET is_active = false WHERE id = %s", 
+                        f"UPDATE mcp_tools SET is_active = false WHERE id = {param_style}", 
                         (tool_id,)
                     )
                 else:
                     # 하드 삭제: 완전 제거
-                    cursor.execute("DELETE FROM mcp_tools WHERE id = %s", (tool_id,))
+                    cursor.execute(f"DELETE FROM mcp_tools WHERE id = {param_style}", (tool_id,))
 
                 if cursor.rowcount == 0:
                     logger.warning(f"🗑️ 삭제할 MCP 도구를 찾을 수 없음 | ID: {tool_id}")
@@ -394,16 +422,17 @@ class MCPToolService:
         try:
             logger.info(f"🗑️ MCP 도구 삭제 시작 | 이름: {tool_name}")
 
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
+            with get_db_connection(use_dict_cursor=False) as (conn, cursor):
+                from database import DB_TYPE
+                param_style = "%s" if DB_TYPE == "postgres" else "?"
 
                 if soft_delete:
                     cursor.execute(
-                        "UPDATE mcp_tools SET is_active = false WHERE name = %s", 
+                        f"UPDATE mcp_tools SET is_active = false WHERE name = {param_style}", 
                         (tool_name,)
                     )
                 else:
-                    cursor.execute("DELETE FROM mcp_tools WHERE name = %s", (tool_name,))
+                    cursor.execute(f"DELETE FROM mcp_tools WHERE name = {param_style}", (tool_name,))
 
                 if cursor.rowcount == 0:
                     logger.warning(f"🗑️ 삭제할 MCP 도구를 찾을 수 없음 | 이름: {tool_name}")
@@ -455,22 +484,23 @@ class MCPToolService:
         try:
             logger.info("📊 MCP 도구 통계 조회 시작")
 
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
+            with get_db_connection() as (conn, cursor):
+                from database import DB_TYPE
 
                 # 전체 도구 수
                 cursor.execute("SELECT COUNT(*) as total FROM mcp_tools")
                 total_tools = cursor.fetchone()['total']
 
                 # 활성 도구 수
-                cursor.execute("SELECT COUNT(*) as active FROM mcp_tools WHERE is_active = true")
+                active_param = 1 if DB_TYPE == "sqlite" else "true"
+                cursor.execute(f"SELECT COUNT(*) as active FROM mcp_tools WHERE is_active = {active_param}")
                 active_tools = cursor.fetchone()['active']
 
                 # Transport 별 통계
-                cursor.execute("""
+                cursor.execute(f"""
                     SELECT transport, COUNT(*) as count 
                     FROM mcp_tools 
-                    WHERE is_active = true
+                    WHERE is_active = {active_param}
                     GROUP BY transport
                 """)
                 transport_stats = {row['transport']: row['count'] for row in cursor.fetchall()}

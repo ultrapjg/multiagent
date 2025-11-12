@@ -9,8 +9,8 @@ import re
 import requests
 import os
 
-BACKEND_URL=os.getenv("BACKEND_URL", "http://backend:8000")
-BACKEND_WEBSOCKET=os.getenv("BACKEND_WEBSOCKET", "ws://backend:8000")
+BACKEND_URL=os.getenv("BACKEND_URL", "http://localhost:8000")
+BACKEND_WEBSOCKET=os.getenv("BACKEND_WEBSOCKET", "ws://localhost:8000")
 
 st.set_page_config(
     page_title="🤖 AI Assistant with HITL",
