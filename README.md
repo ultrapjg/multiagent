@@ -1,14 +1,75 @@
-# 실행 방법 ()
-"""
-1. backend 구동
-cd backend
-python main.py
+# LangGraph 다중 에이전트 협업 플랫폼
 
-2. admin-frontend 구동
-cd admin-frontend
-streamlit run main.py --server.port=8501
+이 프로젝트는 LangGraph, FastAPI, Streamlit으로 구축된 다중 에이전트 협업 플랫폼입니다. 복잡한 작업을 함께 해결할 수 있는 여러 AI 에이전트를 생성하고 관리하기 위한 프레임워크를 제공합니다.
 
-3. user-frontend 구동
-cd user-frontend
-streamlit run main.py --server.port=8502
-"""
+## 아키텍처
+
+이 시스템은 세 가지 주요 구성 요소로 이루어져 있습니다:
+
+*   **백엔드**: 에이전트를 조율하고, 도구를 관리하며, 에이전트와 프론트엔드 간의 통신을 처리하는 FastAPI 서버입니다.
+*   **사용자 프론트엔드**: 사용자가 AI 에이전트와 상호작용할 수 있는 채팅 인터페이스를 제공하는 Streamlit 애플리케이션입니다.
+*   **관리자 프론트엔드**: 관리자가 시스템을 모니터링하고, 도구를 관리하며, 에이전트 활동을 볼 수 있는 대시보드 역할을 하는 Streamlit 애플리케이션입니다.
+
+## 로컬 개발 및 디버깅
+
+이 섹션에서는 개발 및 디버깅 목적으로 로컬 컴퓨터에서 프로젝트를 설정하고 실행하는 방법을 설명합니다. 이 설정은 간단한 SQLite 데이터베이스를 사용하며 모든 서비스를 호스트 머신에서 직접 실행합니다.
+
+### 사전 요구 사항
+
+*   Python 3.10 이상
+*   패키지 관리를 위한 `pip`
+
+### 설정 단계
+
+1.  **가상 환경 생성 (권장)**
+
+    프로젝트 종속성을 관리하기 위해 가상 환경을 사용하는 것이 좋습니다.
+
+    ```bash
+    python -m venv .venv
+    source .venv/bin/activate  # Windows에서는 `.venv\Scripts\activate`를 사용하세요.
+    ```
+
+2.  **환경 파일 생성**
+
+    이 프로젝트는 설정을 위해 `.env` 파일을 사용합니다. 예제 파일을 복사하여 생성할 수 있습니다.
+
+    ```bash
+    copy .env.example .env
+    ```
+
+    기본 `.env` 파일은 로컬 디버깅 설정에 맞게 구성되어 있습니다.
+
+3.  **종속성 설치**
+
+    백엔드와 프론트엔드에 필요한 모든 Python 패키지를 설치합니다.
+
+    ```bash
+    pip install -r requirements/shared.txt -r requirements/backend.txt -r requirements/admin-frontend.txt -r requirements/user-frontend.txt
+    ```
+
+### 애플리케이션 실행
+
+제공된 개발 스크립트를 사용하여 모든 서비스를 함께 실행할 수 있습니다.
+
+```bash
+python run_dev.py
+```
+
+이 스크립트는 백엔드, 사용자 프론트엔드, 관리자 프론트엔드를 동시에 시작합니다.
+
+서비스가 실행되면 다음 URL에서 접근할 수 있습니다.
+
+*   **백엔드 API**: `http://localhost:8000`
+*   **사용자 인터페이스**: `http://localhost:8501`
+*   **관리자 대시보드**: `http://localhost:8502`
+
+### 로컬 디버깅 브랜치에 대하여
+
+이 로컬 디버깅 설정을 활성화하기 위해 적용된 변경 사항은 `feature/local-debugging` 브랜치에 저장되어 있습니다. 여기에는 다음이 포함됩니다.
+
+*   **데이터베이스**: 편의를 위해 데이터베이스 연결이 SQLite를 사용하도록 수정되었습니다. 데이터베이스 파일(`shared_data.db`)은 프로젝트의 루트 디렉토리에 생성됩니다.
+*   **구성**: 프론트엔드가 기본적으로 `localhost`의 백엔드에 연결되도록 구성되었습니다.
+*   **종속성**: 로컬 실행에 필요한 추가 종속성이 추가되었습니다.
+
+이 설정은 개발용이며 프로덕션 환경과 다를 수 있습니다.
